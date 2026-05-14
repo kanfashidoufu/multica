@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -144,6 +145,20 @@ func (s *OSSStorage) DeleteKeys(ctx context.Context, keys []string) {
 	for _, key := range keys {
 		s.Delete(ctx, key)
 	}
+}
+
+func (s *OSSStorage) GetReader(ctx context.Context, key string) (io.ReadCloser, error) {
+	if key == "" {
+		return nil, fmt.Errorf("oss GetReader: empty key")
+	}
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("oss GetObject: %w", err)
+	}
+	return out.Body, nil
 }
 
 func (s *OSSStorage) Upload(ctx context.Context, key string, data []byte, contentType string, filename string) (string, error) {

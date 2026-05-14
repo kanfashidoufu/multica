@@ -1,6 +1,10 @@
 package storage
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+)
 
 func TestOSSStorageKeyFromURL(t *testing.T) {
 	store := &OSSStorage{
@@ -64,5 +68,19 @@ func TestOSSStorageCdnDomain(t *testing.T) {
 	store.publicBaseURL = ""
 	if got := store.CdnDomain(); got != "multica-test.oss-cn-hangzhou.aliyuncs.com" {
 		t.Fatalf("CdnDomain without public base = %q, want multica-test.oss-cn-hangzhou.aliyuncs.com", got)
+	}
+}
+
+func TestOSSStorageGetReaderRejectsEmptyKey(t *testing.T) {
+	store := &OSSStorage{}
+	rc, err := store.GetReader(context.Background(), "")
+	if err == nil {
+		t.Fatal("GetReader should reject an empty key")
+	}
+	if rc != nil {
+		t.Fatal("GetReader should not return a reader for an empty key")
+	}
+	if !strings.Contains(err.Error(), "empty key") {
+		t.Fatalf("GetReader error = %q, want empty key", err)
 	}
 }
