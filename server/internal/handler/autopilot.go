@@ -2,16 +2,15 @@ package handler
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/multica-ai/multica/server/internal/issueguard"
 	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -56,11 +55,24 @@ type AutopilotTriggerResponse struct {
 	// MULTICA_PUBLIC_URL setting. Nil when the server has no public URL
 	// configured; clients then build the URL themselves from webhook_path
 	// plus their API base / current origin.
-	WebhookURL  *string `json:"webhook_url"`
-	Label       *string `json:"label"`
-	LastFiredAt *string `json:"last_fired_at"`
-	CreatedAt   string  `json:"created_at"`
-	UpdatedAt   string  `json:"updated_at"`
+	WebhookURL *string `json:"webhook_url"`
+	// Provider names the per-endpoint signing/dedupe convention. For now:
+	// "generic" (bearer URL only, Idempotency-Key for dedupe) or "github"
+	// (X-Hub-Signature-256 + X-GitHub-Delivery). Omitted for non-webhook
+	// triggers.
+	Provider *string `json:"provider"`
+	// HasSigningSecret indicates whether a signing secret is configured on
+	// the trigger. The secret itself is never returned — it is set via a
+	// dedicated write-only endpoint. Always false for non-webhook triggers.
+	HasSigningSecret bool `json:"has_signing_secret"`
+	// SigningSecretHint is the last 4 characters of the configured secret,
+	// surfaced to help operators tell two secrets apart in the UI. Nil when
+	// no secret is configured.
+	SigningSecretHint *string `json:"signing_secret_hint"`
+	Label             *string `json:"label"`
+	LastFiredAt       *string `json:"last_fired_at"`
+	CreatedAt         string  `json:"created_at"`
+	UpdatedAt         string  `json:"updated_at"`
 }
 
 type AutopilotRunResponse struct {
@@ -121,8 +133,29 @@ func (h *Handler) triggerToResponse(t db.AutopilotTrigger) AutopilotTriggerRespo
 			full := h.cfg.PublicURL + path
 			resp.WebhookURL = &full
 		}
+		provider := t.Provider
+		if provider == "" {
+			provider = "generic"
+		}
+		resp.Provider = &provider
+		if t.SigningSecret.Valid && t.SigningSecret.String != "" {
+			resp.HasSigningSecret = true
+			hint := signingSecretHint(t.SigningSecret.String)
+			resp.SigningSecretHint = &hint
+		}
 	}
 	return resp
+}
+
+// signingSecretHint returns the last 4 characters of the signing secret so a
+// configured-vs-rotated state is visible in the UI without exposing the
+// secret itself. Truncating below 4 chars (which the validator already
+// rejects) just returns an empty string.
+func signingSecretHint(secret string) string {
+	if len(secret) < 4 {
+		return ""
+	}
+	return secret[len(secret)-4:]
 }
 
 // webhookPathForToken composes the path used by the public ingress route.
@@ -193,6 +226,22 @@ type CreateAutopilotTriggerRequest struct {
 	CronExpression *string `json:"cron_expression"`
 	Timezone       *string `json:"timezone"`
 	Label          *string `json:"label"`
+	// Provider is currently only meaningful for kind=webhook. Allowed
+	// values: "generic" (default) or "github". Unset → "generic".
+	Provider *string `json:"provider"`
+}
+
+// SetSigningSecretRequest is the body shape for PUT
+// /api/autopilots/{id}/triggers/{triggerId}/signing-secret. Lives in its own
+// type so the secret never appears alongside other fields on the trigger
+// update path — handlers that log request bodies for debugging cannot pick it
+// up by accident.
+type SetSigningSecretRequest struct {
+	// SigningSecret is the new HMAC key. Sending an empty string explicitly
+	// clears the secret (disables signature verification). Pass any
+	// reasonably entropic value — GitHub's docs recommend at least 32 random
+	// characters; we enforce a 16-char minimum on non-empty input.
+	SigningSecret string `json:"signing_secret"`
 }
 
 type UpdateAutopilotTriggerRequest struct {
@@ -298,6 +347,12 @@ func (h *Handler) CreateAutopilot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "execution_mode must be create_issue or run_only")
 		return
 	}
+	if req.IssueTitleTemplate != nil {
+		if err := service.ValidateIssueTitleTemplate(*req.IssueTitleTemplate); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
 	workspaceID := h.resolveWorkspaceID(r)
 	userID, ok := requireUserID(w, r)
@@ -391,6 +446,12 @@ func (h *Handler) UpdateAutopilot(w http.ResponseWriter, r *http.Request) {
 		params.Description = ptrToText(req.Description)
 	}
 	if _, ok := rawFields["issue_title_template"]; ok {
+		if req.IssueTitleTemplate != nil {
+			if err := service.ValidateIssueTitleTemplate(*req.IssueTitleTemplate); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
 		params.IssueTitleTemplate = ptrToText(req.IssueTitleTemplate)
 	}
 	if _, ok := rawFields["assignee_id"]; ok {
@@ -496,6 +557,22 @@ func (h *Handler) CreateAutopilotTrigger(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "timezone is not valid for webhook triggers")
 		return
 	}
+	// Provider only applies to webhook triggers and the value space is
+	// closed — reject unknowns early so a typo on create doesn't quietly
+	// degrade into a "generic" trigger that bypasses provider-specific
+	// dedupe / signature behaviour.
+	provider := "generic"
+	if req.Provider != nil && *req.Provider != "" {
+		if req.Kind != "webhook" {
+			writeError(w, http.StatusBadRequest, "provider is only valid for webhook triggers")
+			return
+		}
+		if !isAllowedWebhookProvider(*req.Provider) {
+			writeError(w, http.StatusBadRequest, "provider must be generic or github")
+			return
+		}
+		provider = *req.Provider
+	}
 
 	if req.Timezone != nil && *req.Timezone != "" {
 		if err := service.ValidateTimezone(*req.Timezone); err != nil {
@@ -533,7 +610,7 @@ func (h *Handler) CreateAutopilotTrigger(w http.ResponseWriter, r *http.Request)
 		// entry (vanishingly unlikely with 256 bits but the retry keeps
 		// the failure mode obvious if RNG is degraded), we re-generate
 		// and re-INSERT — never UPDATE.
-		trigger, err := h.createWebhookTriggerWithMintedToken(r, ap.ID, ptrToText(req.Label))
+		trigger, err := h.createWebhookTriggerWithMintedToken(r, ap.ID, ptrToText(req.Label), provider)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to create trigger")
 			return
@@ -584,6 +661,7 @@ func (h *Handler) createWebhookTriggerWithMintedToken(
 	r *http.Request,
 	autopilotID pgtype.UUID,
 	label pgtype.Text,
+	provider string,
 ) (db.AutopilotTrigger, error) {
 	for attempt := 0; attempt < 3; attempt++ {
 		token, err := generateWebhookToken()
@@ -596,6 +674,7 @@ func (h *Handler) createWebhookTriggerWithMintedToken(
 			Enabled:      true,
 			Label:        label,
 			WebhookToken: pgtype.Text{String: token, Valid: true},
+			Provider:     pgtype.Text{String: provider, Valid: provider != ""},
 		})
 		if err == nil {
 			return trigger, nil
@@ -605,6 +684,15 @@ func (h *Handler) createWebhookTriggerWithMintedToken(
 		}
 	}
 	return db.AutopilotTrigger{}, fmt.Errorf("could not mint unique webhook token")
+}
+
+func isAllowedWebhookProvider(p string) bool {
+	switch p {
+	case "generic", "github":
+		return true
+	default:
+		return false
+	}
 }
 
 func (h *Handler) UpdateAutopilotTrigger(w http.ResponseWriter, r *http.Request) {
@@ -821,6 +909,74 @@ func (h *Handler) RotateAutopilotTriggerWebhookToken(w http.ResponseWriter, r *h
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// SetAutopilotTriggerSigningSecret sets (or clears) the HMAC signing secret
+// for a webhook trigger. Lives on its own endpoint so the secret value never
+// shares a request body with any other field — keeping it out of generic
+// request-body logs and audit captures that may include patch payloads.
+//
+// Empty body / empty `signing_secret` clears the secret and reverts the
+// trigger to bearer-token-only authentication. The response carries
+// `has_signing_secret` + `signing_secret_hint`; the secret itself is never
+// echoed back, matching the GitHub / Stripe industry pattern.
+func (h *Handler) SetAutopilotTriggerSigningSecret(w http.ResponseWriter, r *http.Request) {
+	autopilotID := chi.URLParam(r, "id")
+	triggerID := chi.URLParam(r, "triggerId")
+	workspaceID := h.resolveWorkspaceID(r)
+
+	ap, ok := h.loadAutopilotInWorkspace(w, r, autopilotID, workspaceID)
+	if !ok {
+		return
+	}
+	triggerUUID, ok := parseUUIDOrBadRequest(w, triggerID, "trigger id")
+	if !ok {
+		return
+	}
+	prev, err := h.Queries.GetAutopilotTrigger(r.Context(), triggerUUID)
+	if err != nil || uuidToString(prev.AutopilotID) != uuidToString(ap.ID) {
+		writeError(w, http.StatusNotFound, "trigger not found")
+		return
+	}
+	if prev.Kind != "webhook" {
+		writeError(w, http.StatusBadRequest, "trigger is not a webhook trigger")
+		return
+	}
+
+	var req SetSigningSecretRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	secret := strings.TrimSpace(req.SigningSecret)
+	// 16 chars is the floor: enough to make brute force impractical for the
+	// SHA-256 HMAC but low enough not to reject providers that mint shorter
+	// keys (Slack signing secrets are 32 hex chars; GitHub recommends 32).
+	if secret != "" && len(secret) < 16 {
+		writeError(w, http.StatusBadRequest, "signing_secret must be at least 16 characters")
+		return
+	}
+
+	param := db.SetAutopilotTriggerSigningSecretParams{ID: triggerUUID}
+	if secret != "" {
+		param.SigningSecret = pgtype.Text{String: secret, Valid: true}
+	}
+	updated, err := h.Queries.SetAutopilotTriggerSigningSecret(r.Context(), param)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update signing secret")
+		return
+	}
+
+	resp := h.triggerToResponse(updated)
+	userID, _ := requireUserID(w, r)
+	// Publish the trigger update so the UI can refresh the has_signing_secret
+	// badge in real time. The event payload only carries the response shape,
+	// which excludes the secret.
+	h.publish(protocol.EventAutopilotUpdated, workspaceID, "member", userID, map[string]any{
+		"autopilot_id": uuidToString(ap.ID),
+		"trigger":      resp,
+	})
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // ── Runs ────────────────────────────────────────────────────────────────────
 
 func (h *Handler) ListAutopilotRuns(w http.ResponseWriter, r *http.Request) {
@@ -921,20 +1077,6 @@ func (h *Handler) TriggerAutopilot(w http.ResponseWriter, r *http.Request) {
 
 	run, err := h.AutopilotService.DispatchAutopilot(r.Context(), autopilot, pgtype.UUID{}, "manual", nil)
 	if err != nil {
-		var duplicate *issueguard.ActiveDuplicateError
-		if errors.As(err, &duplicate) {
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"code":  "active_duplicate_issue",
-				"error": duplicate.Error(),
-				"issue": map[string]any{
-					"id":         duplicate.ID,
-					"identifier": duplicate.Identifier,
-					"title":      duplicate.Title,
-					"status":     duplicate.Status,
-				},
-			})
-			return
-		}
 		writeError(w, http.StatusInternalServerError, "failed to trigger autopilot: "+err.Error())
 		return
 	}

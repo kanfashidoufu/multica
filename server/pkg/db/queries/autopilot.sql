@@ -62,10 +62,11 @@ WHERE id = $1;
 -- name: CreateAutopilotTrigger :one
 INSERT INTO autopilot_trigger (
     autopilot_id, kind, enabled, cron_expression, timezone,
-    next_run_at, webhook_token, label
+    next_run_at, webhook_token, label, provider
 ) VALUES (
     $1, $2, $3, sqlc.narg('cron_expression'), sqlc.narg('timezone'),
-    sqlc.narg('next_run_at'), sqlc.narg('webhook_token'), sqlc.narg('label')
+    sqlc.narg('next_run_at'), sqlc.narg('webhook_token'), sqlc.narg('label'),
+    COALESCE(sqlc.narg('provider')::text, 'generic')
 ) RETURNING *;
 
 -- name: UpdateAutopilotTrigger :one
@@ -132,6 +133,19 @@ UPDATE autopilot_trigger
 SET webhook_token = $2,
     updated_at = now()
 WHERE id = $1
+RETURNING *;
+
+-- name: SetAutopilotTriggerSigningSecret :one
+-- Writes the signing secret for a webhook trigger. Kept as a dedicated query
+-- (not a field on UpdateAutopilotTrigger) so the request body for the
+-- write-only endpoint only ever carries the secret value, with no risk of an
+-- accidental log line leaking it alongside other fields. Restricted to
+-- webhook triggers to avoid corrupting unrelated state.
+UPDATE autopilot_trigger
+SET signing_secret = sqlc.narg('signing_secret'),
+    updated_at = now()
+WHERE id = $1
+  AND kind = 'webhook'
 RETURNING *;
 
 -- =====================

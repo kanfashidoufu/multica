@@ -1296,7 +1296,14 @@ func (d *Daemon) handleHeartbeatActions(ctx context.Context, runtimeID string, r
 			go d.handleLocalSkillList(ctx, *rt, resp.PendingLocalSkills.ID)
 		}
 	}
-	if resp.PendingLocalSkillImport != nil {
+	// Prefer the batch field (new backend); fall back to singular (old backend).
+	if len(resp.PendingLocalSkillImports) > 0 {
+		if rt := d.findRuntime(runtimeID); rt != nil {
+			for _, imp := range resp.PendingLocalSkillImports {
+				go d.handleLocalSkillImport(ctx, *rt, imp)
+			}
+		}
+	} else if resp.PendingLocalSkillImport != nil {
 		if rt := d.findRuntime(runtimeID); rt != nil {
 			go d.handleLocalSkillImport(ctx, *rt, *resp.PendingLocalSkillImport)
 		}
@@ -2199,31 +2206,25 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// Repos are passed as metadata only — the agent checks them out on demand
 	// via `multica repo checkout <url>`.
 	taskCtx := execenv.TaskContextForEnv{
-		IssueID:                      task.IssueID,
-		IssueTitle:                   task.IssueTitle,
-		IssueDescription:             task.IssueDescription,
-		TriggerCommentID:             task.TriggerCommentID,
-		TriggerCommentContent:        task.TriggerCommentContent,
-		AgentID:                      agentID,
-		AgentName:                    agentName,
-		AgentInstructions:            instructions,
-		AgentSkills:                  convertSkillsForEnv(skills),
-		Repos:                        convertReposForEnv(task.Repos),
-		ProjectID:                    task.ProjectID,
-		ProjectTitle:                 task.ProjectTitle,
-		ProjectResources:             convertProjectResourcesForEnv(task.ProjectResources),
-		HasIssueOrCommentAttachments: task.HasIssueOrCommentAttachments,
-		ChatSessionID:                task.ChatSessionID,
-		ChatMessage:                  task.ChatMessage,
-		ChatMessageAttachments:       convertAttachmentsForEnv(task.ChatMessageAttachments),
-		AutopilotRunID:               task.AutopilotRunID,
-		AutopilotID:                  task.AutopilotID,
-		AutopilotTitle:               task.AutopilotTitle,
-		AutopilotDescription:         task.AutopilotDescription,
-		AutopilotSource:              task.AutopilotSource,
-		AutopilotTriggerPayload:      strings.TrimSpace(string(task.AutopilotTriggerPayload)),
-		QuickCreatePrompt:            task.QuickCreatePrompt,
-		IsSquadLeader:                strings.Contains(instructions, "## Squad Operating Protocol"),
+		IssueID:                 task.IssueID,
+		TriggerCommentID:        task.TriggerCommentID,
+		AgentID:                 agentID,
+		AgentName:               agentName,
+		AgentInstructions:       instructions,
+		AgentSkills:             convertSkillsForEnv(skills),
+		Repos:                   convertReposForEnv(task.Repos),
+		ProjectID:               task.ProjectID,
+		ProjectTitle:            task.ProjectTitle,
+		ProjectResources:        convertProjectResourcesForEnv(task.ProjectResources),
+		ChatSessionID:           task.ChatSessionID,
+		AutopilotRunID:          task.AutopilotRunID,
+		AutopilotID:             task.AutopilotID,
+		AutopilotTitle:          task.AutopilotTitle,
+		AutopilotDescription:    task.AutopilotDescription,
+		AutopilotSource:         task.AutopilotSource,
+		AutopilotTriggerPayload: strings.TrimSpace(string(task.AutopilotTriggerPayload)),
+		QuickCreatePrompt:       task.QuickCreatePrompt,
+		IsSquadLeader:           strings.Contains(instructions, "## Squad Operating Protocol"),
 	}
 
 	// Mark candidate env roots as active before any env work so the GC loop
@@ -3027,21 +3028,6 @@ func convertProjectResourcesForEnv(resources []ProjectResourceData) []execenv.Pr
 			ResourceType: r.ResourceType,
 			ResourceRef:  r.ResourceRef,
 			Label:        r.Label,
-		}
-	}
-	return result
-}
-
-func convertAttachmentsForEnv(attachments []ChatAttachmentMeta) []execenv.AttachmentContextForEnv {
-	if len(attachments) == 0 {
-		return nil
-	}
-	result := make([]execenv.AttachmentContextForEnv, len(attachments))
-	for i, a := range attachments {
-		result[i] = execenv.AttachmentContextForEnv{
-			ID:          a.ID,
-			Filename:    a.Filename,
-			ContentType: a.ContentType,
 		}
 	}
 	return result
