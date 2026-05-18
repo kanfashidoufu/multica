@@ -198,6 +198,30 @@ jobs:
           docker buildx imagetools inspect \
             ghcr.io/${{ github.repository_owner }}/multica-backend:${{ steps.meta.outputs.version }}
 
+      - name: Login to QTB registry
+        uses: docker/login-action@v3
+        with:
+          registry: hz-qtb-registry.cn-hangzhou.cr.aliyuncs.com
+          username: ${{ secrets.QTB_REGISTRY_USERNAME }}
+          password: ${{ secrets.QTB_REGISTRY_PASSWORD }}
+
+      - name: Push QTB mirror tags
+        working-directory: /tmp/digests
+        run: |
+          mirror_image="hz-qtb-registry.cn-hangzhou.cr.aliyuncs.com/qtb/multica-backend"
+          mirror_tags=$(jq -cr --arg mirror_image "$mirror_image" \
+            '.tags | map(sub("^.*/multica-backend"; $mirror_image) | "-t " + .) | join(" ")' \
+            <<< "$DOCKER_METADATA_OUTPUT_JSON")
+
+          docker buildx imagetools create \
+            ${mirror_tags} \
+            $(printf 'ghcr.io/${{ github.repository_owner }}/multica-backend@sha256:%s ' *)
+
+      - name: Inspect QTB mirror image
+        run: |
+          docker buildx imagetools inspect \
+            hz-qtb-registry.cn-hangzhou.cr.aliyuncs.com/qtb/multica-backend:${{ steps.meta.outputs.version }}
+
   docker-web-build:
     needs: verify
     strategy:
@@ -314,6 +338,30 @@ jobs:
         run: |
           docker buildx imagetools inspect \
             ghcr.io/${{ github.repository_owner }}/multica-web:${{ steps.meta.outputs.version }}
+
+      - name: Login to QTB registry
+        uses: docker/login-action@v3
+        with:
+          registry: hz-qtb-registry.cn-hangzhou.cr.aliyuncs.com
+          username: ${{ secrets.QTB_REGISTRY_USERNAME }}
+          password: ${{ secrets.QTB_REGISTRY_PASSWORD }}
+
+      - name: Push QTB mirror tags
+        working-directory: /tmp/digests
+        run: |
+          mirror_image="hz-qtb-registry.cn-hangzhou.cr.aliyuncs.com/qtb/multica-web"
+          mirror_tags=$(jq -cr --arg mirror_image "$mirror_image" \
+            '.tags | map(sub("^.*/multica-web"; $mirror_image) | "-t " + .) | join(" ")' \
+            <<< "$DOCKER_METADATA_OUTPUT_JSON")
+
+          docker buildx imagetools create \
+            ${mirror_tags} \
+            $(printf 'ghcr.io/${{ github.repository_owner }}/multica-web@sha256:%s ' *)
+
+      - name: Inspect QTB mirror image
+        run: |
+          docker buildx imagetools inspect \
+            hz-qtb-registry.cn-hangzhou.cr.aliyuncs.com/qtb/multica-web:${{ steps.meta.outputs.version }}
 
   # Build the Desktop installers for Linux and Windows and upload them to
   # the GitHub Release that the `release` job above just published. macOS
