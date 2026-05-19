@@ -32,7 +32,7 @@ test("onboarding v2 — welcome → source → role → use_case (skip path)", a
 
   // 2. Source step
   await expect(page.getByText("How did you hear about Multica?")).toBeVisible({ timeout: 10000 });
-  await expect(page.getByText(`Step 1 of 7`)).toBeVisible();
+  await expect(page.getByText(`Step 1 of 6`)).toBeVisible();
   await page.waitForTimeout(500);
   await page.screenshot({ path: `${SHOTS_DIR}/02-source.png` });
 
@@ -42,7 +42,7 @@ test("onboarding v2 — welcome → source → role → use_case (skip path)", a
 
   // 3. Role step
   await expect(page.getByText("Which best describes you?")).toBeVisible({ timeout: 10000 });
-  await expect(page.getByText(`Step 2 of 7`)).toBeVisible();
+  await expect(page.getByText(`Step 2 of 6`)).toBeVisible();
   await page.waitForTimeout(500);
   await page.screenshot({ path: `${SHOTS_DIR}/03-role.png` });
 
@@ -51,7 +51,7 @@ test("onboarding v2 — welcome → source → role → use_case (skip path)", a
 
   // 4. Use case step
   await expect(page.getByText("What do you want to use Multica for?")).toBeVisible({ timeout: 10000 });
-  await expect(page.getByText(`Step 3 of 7`)).toBeVisible();
+  await expect(page.getByText(`Step 3 of 6`)).toBeVisible();
   await page.waitForTimeout(500);
   await page.screenshot({ path: `${SHOTS_DIR}/04-use-case.png` });
 

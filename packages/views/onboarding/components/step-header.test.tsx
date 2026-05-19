@@ -31,7 +31,7 @@ describe("StepHeader", () => {
   });
 
   it("shows 'Step N of M' text matching the current step's position", () => {
-    // workspace is index 3 (after source/role/use_case) → Step 4 of 7
+    // workspace is index 3 (after source/role/use_case) → Step 4.
     render(<StepHeader currentStep="workspace" />);
     expect(
       screen.getByText(`Step 4 of ${ONBOARDING_STEP_ORDER.length}`),
@@ -39,9 +39,9 @@ describe("StepHeader", () => {
   });
 
   it("sets accessible progressbar attrs", () => {
-    render(<StepHeader currentStep="agent" />);
+    render(<StepHeader currentStep="runtime" />);
     const bar = screen.getByRole("progressbar");
-    expect(bar).toHaveAttribute("aria-valuenow", "6"); // agent is index 5 → step 6
+    expect(bar).toHaveAttribute("aria-valuenow", "5"); // runtime is index 4 → step 5
     expect(bar).toHaveAttribute("aria-valuemax", String(ONBOARDING_STEP_ORDER.length));
   });
 

@@ -190,6 +190,20 @@
     "add_more_hint": "Add more agents anytime. A small team of specialized agents beats one jack-of-all-trades.",
     "docs_link": "Creating your first agent →"
   },
+  "step_teammate": {
+    "eyebrow": "First teammate",
+    "headline": "Create your first teammate: Multica Helper",
+    "lede": "Multica Helper is a starter agent connected to {{runtime}}. It will open your first guided issue and help you learn the core workflow.",
+    "avatar_label": "Multica Helper avatar",
+    "name": "Multica Helper",
+    "role": "Onboarding guide",
+    "point_issue": "Starts from one onboarding issue",
+    "point_context": "Uses your workspace context and issue details",
+    "point_customize": "You can rename or replace it later",
+    "footer_hint": "We'll create one agent and one onboarding issue.",
+    "create_action": "Create Multica Helper",
+    "create_failed": "Failed to create Multica Helper"
+  },
   "step_workspace": {
     "eyebrow_first": "Your first workspace",
     "eyebrow_resume": "Pick up or start fresh",
@@ -232,8 +246,8 @@
     "perk_invite": "Invite teammates — they see only this workspace",
     "perk_switch": "Switch to other workspaces anytime from the top-left",
     "next_runtime": "Connect a computer so your agents have somewhere to run",
-    "next_agent": "Create your first agent matched to your role",
-    "next_starter": "Watch it pick up a starter task and reply",
+    "next_agent": "Create Multica Helper from your connected runtime",
+    "next_starter": "Open one onboarding issue for your next step",
     "preview": {
       "inbox_label": "Inbox",
       "inbox_meta": "your notifications",

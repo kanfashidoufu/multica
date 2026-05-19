@@ -20,6 +20,5 @@ export const ONBOARDING_STEP_ORDER: readonly OnboardingStep[] = [
   "use_case",
   "workspace",
   "runtime",
-  "agent",
-  "first_issue",
+  "teammate",
 ] as const;

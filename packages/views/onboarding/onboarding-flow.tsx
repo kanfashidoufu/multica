@@ -7,17 +7,17 @@ import { captureEvent } from "@multica/core/analytics";
 import { setCurrentWorkspace } from "@multica/core/platform";
 import { useAuthStore } from "@multica/core/auth";
 import {
+  bootstrapNoRuntimeOnboarding,
+  bootstrapRuntimeOnboarding,
   completeOnboarding,
   ONBOARDING_STEP_ORDER,
   saveQuestionnaire,
-  type OnboardingCompletionPath,
   type OnboardingStep,
   type QuestionnaireAnswers,
 } from "@multica/core/onboarding";
+import { issueKeys } from "@multica/core/issues/queries";
 import { workspaceListOptions, workspaceKeys } from "@multica/core/workspace/queries";
-import type { Agent, AgentRuntime, Workspace } from "@multica/core/types";
-import { DragStrip } from "@multica/views/platform";
-import { StepHeader } from "./components/step-header";
+import type { AgentRuntime, Workspace } from "@multica/core/types";
 import { StepWelcome } from "./steps/step-welcome";
 import { StepSource } from "./steps/step-source";
 import { StepRole } from "./steps/step-role";
@@ -25,8 +25,7 @@ import { StepUseCase } from "./steps/step-use-case";
 import { StepWorkspace } from "./steps/step-workspace";
 import { StepRuntimeConnect } from "./steps/step-runtime-connect";
 import { StepPlatformFork } from "./steps/step-platform-fork";
-import { StepAgent } from "./steps/step-agent";
-import { StepFirstIssue } from "./steps/step-first-issue";
+import { StepTeammate } from "./steps/step-teammate";
 import { useT } from "../i18n";
 
 const EMPTY_QUESTIONNAIRE: QuestionnaireAnswers = {
@@ -62,18 +61,18 @@ function mergeQuestionnaire(
 
 /**
  * Shell's onComplete contract:
- *   onComplete(workspace?) — if present, navigate into its issues list;
- *   if omitted, fall back to root. A Starter-content opt-in dialog runs
- *   on the issues page itself (see `StarterContentPrompt`), so the flow
- *   doesn't carry `firstIssueId` any more — there is no welcome issue
- *   created by onboarding.
+ *   onComplete(workspace?, issueId?) — if an issue id is present, navigate
+ *   straight into that onboarding issue; otherwise navigate into the
+ *   workspace issues list. Runtime-connected onboarding creates one
+ *   Multica Helper agent plus one issue; runtime-skipped onboarding creates one
+ *   self-serve issue. Both suppress the old starter-content prompt.
  */
 export function OnboardingFlow({
   onComplete,
   runtimeInstructions,
   onRuntimeRefresh,
 }: {
-  onComplete: (workspace?: Workspace) => void;
+  onComplete: (workspace?: Workspace, issueId?: string) => void;
   runtimeInstructions?: React.ReactNode;
   /** Desktop wires this to restart the bundled daemon so a freshly
    *  installed agent CLI gets picked up on the runtime step. Web omits
@@ -99,7 +98,6 @@ export function OnboardingFlow({
   const [step, setStep] = useState<OnboardingStep>("welcome");
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [runtime, setRuntime] = useState<AgentRuntime | null>(null);
-  const [, setAgent] = useState<Agent | null>(null);
 
   // Fetched at Step 0 + Step 2. Step 2 uses it to detect a pre-existing
   // workspace from an earlier abandoned onboarding (so StepWorkspace shows
@@ -200,33 +198,50 @@ export function OnboardingFlow({
     [advanceFrom],
   );
 
-  const handleRuntimeNext = useCallback((rt: AgentRuntime | null) => {
-    setRuntime(rt);
-    // Custom branch — not derived from ONBOARDING_STEP_ORDER because no
-    // runtime → no agent possible, so we skip Step 4 ("agent") and go
-    // straight to the finalizer. The post-landing StarterContentPrompt
-    // will detect "no agent in this workspace" and offer the self-serve
-    // template.
-    setStep(rt ? "agent" : "first_issue");
-  }, []);
-
-  const handleAgentCreated = useCallback(
-    (created: Agent) => {
-      setAgent(created);
-      // Mark the workspace's agent list stale so the dashboard's first
-      // mount refetches and includes the just-created agent. Without
-      // this, anything resolving an agent ID from the cached list (the
-      // welcome issue's assignee in particular) renders as "Unknown
-      // Agent" until something else triggers a refetch.
-      if (workspace) {
-        qc.invalidateQueries({
-          queryKey: workspaceKeys.agents(workspace.id),
-        });
+  const handleRuntimeNext = useCallback(
+    async (rt: AgentRuntime | null) => {
+      if (!workspace) return;
+      if (!rt) {
+        // No runtime -> no agent execution yet. Create one focused
+        // self-serve onboarding issue instead of seeding the older
+        // multi-issue starter project.
+        try {
+          const result = await bootstrapNoRuntimeOnboarding(workspace.id);
+          await qc.invalidateQueries({ queryKey: issueKeys.all(workspace.id) });
+          onComplete(workspace, result.issue_id || undefined);
+        } catch (err) {
+          toast.error(
+            err instanceof Error ? err.message : t(($) => $.errors.skip_failed),
+          );
+        }
+        return;
       }
-      advanceFrom("agent");
+
+      setRuntime(rt);
+      advanceFrom("runtime");
     },
-    [workspace, qc, advanceFrom],
+    [workspace, qc, onComplete, t, advanceFrom],
   );
+
+  const handleCreateTeammate = useCallback(async () => {
+    if (!workspace || !runtime) return;
+
+    try {
+      const result = await bootstrapRuntimeOnboarding(workspace.id, runtime.id);
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: workspaceKeys.agents(workspace.id) }),
+        qc.invalidateQueries({ queryKey: issueKeys.all(workspace.id) }),
+      ]);
+      onComplete(workspace, result.issue_id || undefined);
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : t(($) => $.step_teammate.create_failed),
+      );
+      throw err;
+    }
+  }, [workspace, runtime, qc, onComplete, t]);
 
   const handleBack = useCallback((from: OnboardingStep) => {
     const idx = ONBOARDING_STEP_ORDER.indexOf(from);
@@ -239,18 +254,9 @@ export function OnboardingFlow({
     setStep(prev);
   }, []);
 
-  // Step 5 fired `completeOnboarding` itself. Here we just route the
-  // user to their workspace — the starter-content decision happens
-  // inside the workspace via the `StarterContentPrompt` dialog.
-  const handleFinished = useCallback(() => {
-    onComplete(workspace ?? undefined);
-  }, [workspace, onComplete]);
-
   // Welcome, Questionnaire, and Workspace own full-bleed two-column
   // layouts (hero / side panel) with their own DragStrip + StepHeader.
-  // The remaining steps (runtime / agent / first_issue) still render
-  // inside a narrow legacy single-column shell below — they'll each
-  // move out as they get redesigned.
+  // The runtime step owns its own full-bleed shell.
   if (step === "welcome") {
     return (
       <StepWelcome
@@ -334,48 +340,17 @@ export function OnboardingFlow({
     );
   }
 
-  // Step 4 owns the same full-bleed editorial shell as Workspace /
-  // Questionnaire. `questionnaire` is threaded through so StepAgent
-  // can recommend a template based on the user's Q1–Q3 answers.
-  // No skip path: reaching Step 4 means a runtime was picked at
-  // Step 3, so creating the agent IS the step's purpose. Users who
-  // want a runtime-less workspace bypass at Step 3 and skip Step 4
-  // entirely (flow routes runtime=null → first_issue directly).
-  if (step === "agent" && runtime) {
+  if (step === "teammate" && workspace && runtime) {
     return (
-      <StepAgent
+      <StepTeammate
         runtime={runtime}
-        questionnaire={answers}
-        onCreated={handleAgentCreated}
-        onBack={() => handleBack("agent")}
+        onCreate={handleCreateTeammate}
+        onBack={() => handleBack("teammate")}
       />
     );
   }
 
-  // Derive the completion-path label for Step 5. The cloud-waitlist
-  // exit was removed from Step 3 (replaced with a "Coming soon" badge)
-  // so this is now a binary: runtime → "full", no runtime → "runtime_skipped".
-  const completionPath: OnboardingCompletionPath = runtime
-    ? "full"
-    : "runtime_skipped";
-
-  return (
-    <div className="animate-onboarding-enter flex min-h-full flex-col">
-      <DragStrip />
-      <div className="flex flex-1 flex-col items-center px-6 pb-12">
-        <div className="flex w-full max-w-xl flex-col gap-8">
-          <StepHeader currentStep={step} />
-          {step === "first_issue" && (
-            <StepFirstIssue
-              onFinished={handleFinished}
-              completionPath={completionPath}
-              workspaceId={workspace?.id}
-            />
-          )}
-        </div>
-      </div>
-    </div>
-  );
+  return null;
 }
 
 export type { OnboardingStep };

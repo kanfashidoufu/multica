@@ -1,9 +1,9 @@
 import type { QuestionnaireAnswers, Role, UseCase } from "./types";
 
 /**
- * Identifier for the four agent templates offered during onboarding
- * Step 6 (Agent). Keep in sync with the template registry inside
- * StepAgent in `packages/views/onboarding/steps/step-agent.tsx`.
+ * Identifier for the four legacy onboarding agent templates. Keep in
+ * sync with the template registry inside StepAgent in
+ * `packages/views/onboarding/steps/step-agent.tsx`.
  */
 export type AgentTemplateId = "coding" | "planning" | "writing" | "assistant";
 

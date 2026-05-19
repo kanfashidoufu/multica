@@ -190,8 +190,8 @@ export function StepPlatformFork({
 
             {/* Inline action bar — hint on the left, Skip on the right.
                 Advancement for the CLI path is owned by the CLI
-                dialog's own "Connect & continue" button; Skip is the
-                self-serve exit. */}
+                dialog's own "Connect & continue" button; Skip creates
+                the single self-serve onboarding issue. */}
             <div className="mt-8 flex max-w-[560px] flex-wrap items-center justify-between gap-x-4 gap-y-2">
               <span
                 aria-live="polite"
@@ -545,4 +545,3 @@ function CliWaitingStatus({ dialogOpen }: { dialogOpen: boolean }) {
     </div>
   );
 }
-

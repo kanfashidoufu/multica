@@ -18,7 +18,7 @@ import { useT } from "../../i18n";
 
 /**
  * Step 2 — "Which best describes you?" Primary signal for the
- * agent template recommendation on Step 6.
+ * onboarding assistant and starter issue content.
  */
 export function StepRole({
   answers,

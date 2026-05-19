@@ -190,6 +190,20 @@
     "add_more_hint": "随时添加更多智能体。一支专长各异的小团队胜过一个万能选手。",
     "docs_link": "创建第一个智能体 →"
   },
+  "step_teammate": {
+    "eyebrow": "第一个队友",
+    "headline": "创建你的第一个队友：Multica Helper",
+    "lede": "Multica Helper 是连接到 {{runtime}} 的入门智能体。它会打开一个上手引导 issue，带你走完核心流程。",
+    "avatar_label": "Multica Helper 头像",
+    "name": "Multica Helper",
+    "role": "上手引导",
+    "point_issue": "只从一个上手引导 issue 开始",
+    "point_context": "读取工作区上下文和 issue 详情",
+    "point_customize": "之后可以改名或替换",
+    "footer_hint": "我们会创建一个智能体和一个上手引导 issue。",
+    "create_action": "创建 Multica Helper",
+    "create_failed": "创建 Multica Helper 失败"
+  },
   "step_workspace": {
     "eyebrow_first": "你的第一个工作区",
     "eyebrow_resume": "继续，或重新开始",
@@ -232,8 +246,8 @@
     "perk_invite": "邀请同事 —— 他们只会看到这个工作区",
     "perk_switch": "随时从左上角切换到其他工作区",
     "next_runtime": "连接一台电脑，给智能体一个跑的地方",
-    "next_agent": "创建符合你角色的第一个智能体",
-    "next_starter": "看它接下入门 task 并回复",
+    "next_agent": "用你连接的运行时创建 Multica Helper",
+    "next_starter": "打开一个上手引导 issue，继续下一步",
     "preview": {
       "inbox_label": "收件箱",
       "inbox_meta": "你的通知",
