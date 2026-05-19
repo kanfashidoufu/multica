@@ -38,10 +38,6 @@ services:
 
   backend:
     image: ${MULTICA_BACKEND_IMAGE:-ghcr.io/kanfashidoufu/multica-backend}:${MULTICA_IMAGE_TAG:-latest}
-    networks:
-      default:
-        aliases:
-          - multica-backend
     depends_on:
       postgres:
         condition: service_healthy

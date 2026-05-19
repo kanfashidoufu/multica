@@ -1,3 +1,4 @@
+      
 name: Release
 
 on:
@@ -208,7 +209,7 @@ jobs:
       - name: Push QTB mirror tags
         working-directory: /tmp/digests
         run: |
-          mirror_image="hz-qtb-registry.cn-hangzhou.cr.aliyuncs.com/qtb/multica-backend"
+          mirror_image="hz-qtb-registry.cn-hangzhou.cr.aliyuncs.com/ops/multica-backend"
           mirror_tags=$(jq -cr --arg mirror_image "$mirror_image" \
             '.tags | map(sub("^.*/multica-backend"; $mirror_image) | "-t " + .) | join(" ")' \
             <<< "$DOCKER_METADATA_OUTPUT_JSON")
@@ -220,7 +221,7 @@ jobs:
       - name: Inspect QTB mirror image
         run: |
           docker buildx imagetools inspect \
-            hz-qtb-registry.cn-hangzhou.cr.aliyuncs.com/qtb/multica-backend:${{ steps.meta.outputs.version }}
+            hz-qtb-registry.cn-hangzhou.cr.aliyuncs.com/ops/multica-backend:${{ steps.meta.outputs.version }}
 
   docker-web-build:
     needs: verify
@@ -273,7 +274,7 @@ jobs:
           cache-from: type=gha,scope=release-web-${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,mode=max,scope=release-web-${{ env.PLATFORM_PAIR }}
           build-args: |
-            REMOTE_API_URL=http://multica-backend:8080
+            REMOTE_API_URL=https://qtb-multica-backend.lggj.work
             NEXT_PUBLIC_APP_VERSION=${{ needs.verify.outputs.tag_name }}
           outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/multica-web,push-by-digest=true,name-canonical=true,push=true
 
@@ -349,7 +350,7 @@ jobs:
       - name: Push QTB mirror tags
         working-directory: /tmp/digests
         run: |
-          mirror_image="hz-qtb-registry.cn-hangzhou.cr.aliyuncs.com/qtb/multica-web"
+          mirror_image="hz-qtb-registry.cn-hangzhou.cr.aliyuncs.com/ops/multica-frontend"
           mirror_tags=$(jq -cr --arg mirror_image "$mirror_image" \
             '.tags | map(sub("^.*/multica-web"; $mirror_image) | "-t " + .) | join(" ")' \
             <<< "$DOCKER_METADATA_OUTPUT_JSON")
@@ -361,7 +362,7 @@ jobs:
       - name: Inspect QTB mirror image
         run: |
           docker buildx imagetools inspect \
-            hz-qtb-registry.cn-hangzhou.cr.aliyuncs.com/qtb/multica-web:${{ steps.meta.outputs.version }}
+            hz-qtb-registry.cn-hangzhou.cr.aliyuncs.com/ops/multica-frontend:${{ steps.meta.outputs.version }}
 
   # Build the Desktop installers for Linux and Windows and upload them to
   # the GitHub Release that the `release` job above just published. macOS
