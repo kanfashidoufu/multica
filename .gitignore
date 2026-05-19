@@ -44,6 +44,7 @@ apps/web/test-results/
 # local settings
 .claude/
 .tool-versions
+*.p8
 
 # feature tracking
 _features/
