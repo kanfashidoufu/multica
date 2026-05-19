@@ -7,12 +7,12 @@ import {
 } from "./runtime-config";
 
 describe("runtime config", () => {
-  it("uses cloud defaults without a desktop.json file", () => {
+  it("uses packaged defaults without a desktop.json file", () => {
     expect(DEFAULT_RUNTIME_CONFIG).toEqual({
       schemaVersion: 1,
-      apiUrl: "https://api.multica.ai",
-      wsUrl: "wss://api.multica.ai/ws",
-      appUrl: "https://multica.ai",
+      apiUrl: "https://multica.lggj.work",
+      wsUrl: "wss://multica.lggj.work/ws",
+      appUrl: "https://multica.lggj.work",
     });
   });
 
