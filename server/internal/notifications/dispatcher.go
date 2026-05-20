@@ -100,9 +100,6 @@ func (d *Dispatcher) enqueueInboxEvent(e events.Event) {
 		return
 	}
 	notifType := stringField(item, "type")
-	if !deliverableType(notifType) {
-		return
-	}
 
 	inboxItemID, err := util.ParseUUID(stringField(item, "id"))
 	if err != nil {
@@ -322,30 +319,18 @@ func textValue(v pgtype.Text) string {
 	return v.String
 }
 
-var highValueTypes = map[string]bool{
-	"issue_assigned":  true,
-	"mentioned":       true,
-	"new_comment":     true,
-	"task_failed":     true,
-	"agent_completed": true,
-	"task_completed":  true,
-}
-
-func deliverableType(notifType string) bool {
-	return highValueTypes[notifType]
-}
-
 var notifTypeToGroup = map[string]string{
-	"issue_assigned":   "assignments",
-	"unassigned":       "assignments",
-	"assignee_changed": "assignments",
-	"status_changed":   "status_changes",
-	"new_comment":      "comments",
-	"mentioned":        "comments",
-	"priority_changed": "updates",
-	"due_date_changed": "updates",
-	"task_completed":   "agent_activity",
-	"task_failed":      "agent_activity",
-	"agent_blocked":    "agent_activity",
-	"agent_completed":  "agent_activity",
+	"issue_assigned":     "assignments",
+	"unassigned":         "assignments",
+	"assignee_changed":   "assignments",
+	"status_changed":     "status_changes",
+	"new_comment":        "comments",
+	"mentioned":          "comments",
+	"priority_changed":   "updates",
+	"start_date_changed": "updates",
+	"due_date_changed":   "updates",
+	"task_completed":     "agent_activity",
+	"task_failed":        "agent_activity",
+	"agent_blocked":      "agent_activity",
+	"agent_completed":    "agent_activity",
 }

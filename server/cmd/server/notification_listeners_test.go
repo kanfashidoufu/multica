@@ -6,6 +6,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
+	"github.com/multica-ai/multica/server/internal/notifications"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -74,6 +75,29 @@ func newNotificationBus(t *testing.T, queries *db.Queries) *events.Bus {
 	registerSubscriberListeners(bus, queries)
 	registerNotificationListeners(bus, queries)
 	return bus
+}
+
+type testNotificationChannel struct{}
+
+func (testNotificationChannel) Name() string { return "lark" }
+
+func (testNotificationChannel) Send(context.Context, notifications.NotificationMessage) error {
+	return nil
+}
+
+func countNotificationDeliveriesForInboxType(t *testing.T, issueID, recipientID, inboxType string) int {
+	t.Helper()
+	var count int
+	err := testPool.QueryRow(context.Background(), `
+		SELECT count(*)
+		FROM notification_delivery d
+		JOIN inbox_item i ON i.id = d.inbox_item_id
+		WHERE i.issue_id = $1 AND d.recipient_user_id = $2 AND i.type = $3
+	`, issueID, recipientID, inboxType).Scan(&count)
+	if err != nil {
+		t.Fatalf("count notification deliveries: %v", err)
+	}
+	return count
 }
 
 // TestNotification_IssueCreated_AssigneeNotified verifies that when an issue is
@@ -316,6 +340,66 @@ func TestNotification_StatusChanged(t *testing.T) {
 	}
 }
 
+// TestNotificationDispatcher_EnqueuesSubscribedStatusChange verifies that a
+// subscriber who is not directly assigned still gets a Lark delivery row when
+// their inbox receives a non-assignment notification.
+func TestNotificationDispatcher_EnqueuesSubscribedStatusChange(t *testing.T) {
+	queries := db.New(testPool)
+	bus := newNotificationBus(t, queries)
+	dispatcher := notifications.NewDispatcher(
+		queries,
+		notifications.Config{Enabled: true},
+		testNotificationChannel{},
+	)
+	dispatcher.RegisterInboxListener(bus)
+
+	subscriberEmail := "notif-delivery-status-sub@multica.ai"
+	subscriberID := createTestUser(t, subscriberEmail)
+	t.Cleanup(func() { cleanupTestUser(t, subscriberEmail) })
+
+	issueID := createTestIssue(t, testWorkspaceID, testUserID)
+	t.Cleanup(func() {
+		cleanupInboxForIssue(t, issueID)
+		cleanupTestIssue(t, issueID)
+	})
+
+	addTestSubscriber(t, issueID, "member", subscriberID, "commenter")
+
+	bus.Publish(events.Event{
+		Type:        protocol.EventIssueUpdated,
+		WorkspaceID: testWorkspaceID,
+		ActorType:   "member",
+		ActorID:     testUserID,
+		Payload: map[string]any{
+			"issue": handler.IssueResponse{
+				ID:          issueID,
+				WorkspaceID: testWorkspaceID,
+				Title:       "subscribed status delivery issue",
+				Status:      "in_progress",
+				Priority:    "medium",
+				CreatorType: "member",
+				CreatorID:   testUserID,
+			},
+			"assignee_changed": false,
+			"status_changed":   true,
+			"prev_status":      "todo",
+		},
+	})
+
+	items := inboxItemsForRecipient(t, queries, subscriberID)
+	if len(items) != 1 {
+		t.Fatalf("expected 1 inbox item for subscriber, got %d", len(items))
+	}
+	if items[0].Type != "status_changed" {
+		t.Fatalf("expected type 'status_changed', got %q", items[0].Type)
+	}
+
+	count := countNotificationDeliveriesForInboxType(t, issueID, subscriberID, "status_changed")
+	if count != 1 {
+		t.Fatalf("expected 1 notification delivery for subscribed status change, got %d", count)
+	}
+}
+
 // TestNotification_CommentCreated verifies that all subscribers except the
 // commenter receive a "new_comment" notification.
 func TestNotification_CommentCreated(t *testing.T) {
@@ -439,8 +523,8 @@ func TestNotification_AssigneeChanged(t *testing.T) {
 				AssigneeType: &newAssigneeType,
 				AssigneeID:   &newAssigneeID,
 			},
-			"assignee_changed":  true,
-			"status_changed":    false,
+			"assignee_changed":   true,
+			"status_changed":     false,
 			"prev_assignee_type": &oldAssigneeType,
 			"prev_assignee_id":   &oldAssigneeID,
 		},
