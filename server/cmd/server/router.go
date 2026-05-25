@@ -545,6 +545,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Get("/tasks", h.ListAgentTasks)
 					r.Get("/skills", h.ListAgentSkills)
 					r.Put("/skills", h.SetAgentSkills)
+					// Dedicated env-management endpoint. Owner/admin only;
+					// agent actors are denied. Every reveal / write is
+					// audited to activity_log. See MUL-2600 and
+					// internal/handler/agent_env.go.
+					r.Get("/env", h.GetAgentEnv)
+					r.Put("/env", h.UpdateAgentEnv)
 				})
 			})
 

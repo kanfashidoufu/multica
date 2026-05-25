@@ -18,6 +18,8 @@ import type {
   CreateAgentFromTemplateRequest,
   CreateAgentFromTemplateResponse,
   UpdateAgentRequest,
+  AgentEnvResponse,
+  UpdateAgentEnvRequest,
   AgentTask,
   AgentActivityBucket,
   AgentRunCount,
@@ -761,6 +763,31 @@ export class ApiClient {
 
   async archiveAgent(id: string): Promise<Agent> {
     return this.fetch(`/api/agents/${id}/archive`, { method: "POST" });
+  }
+
+  /**
+   * Returns the plaintext `custom_env` map for an agent. Owner/admin
+   * only; calls from agent-actor sessions get a 403. Every successful
+   * call writes an `agent_env_revealed` activity_log row server-side.
+   * MUL-2600.
+   */
+  async getAgentEnv(id: string): Promise<AgentEnvResponse> {
+    return this.fetch(`/api/agents/${id}/env`);
+  }
+
+  /**
+   * Replaces an agent's `custom_env` wholesale. Values equal to
+   * `"****"` are preserved server-side (the **** guard) so a partial
+   * UI edit doesn't overwrite real secrets with the masked
+   * placeholder. Owner/admin only; agent actors get a 403. Every
+   * successful call writes an `agent_env_updated` activity_log row.
+   * MUL-2600.
+   */
+  async updateAgentEnv(id: string, data: UpdateAgentEnvRequest): Promise<AgentEnvResponse> {
+    return this.fetch(`/api/agents/${id}/env`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
   }
 
   async restoreAgent(id: string): Promise<Agent> {
