@@ -161,7 +161,7 @@ type DaemonRegisterRequest struct {
 	DeviceName      string   `json:"device_name"`
 	CLIVersion      string   `json:"cli_version"` // multica CLI version
 	LaunchedBy      string   `json:"launched_by"` // "desktop" when spawned by the Electron app
-	Runtimes []struct {
+	Runtimes        []struct {
 		Name    string `json:"name"`
 		Type    string `json:"type"`
 		Version string `json:"version"` // agent CLI version (claude/codex)
@@ -1507,6 +1507,24 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, "task workspace isolation check failed")
 		return
+	}
+
+	// Workspace-level Context (workspace.context DB column) — the per-workspace
+	// system prompt that workspace owners set in Settings → General. Inject it
+	// into the brief regardless of task kind (issue / chat / autopilot /
+	// quick-create) so every agent running in the workspace sees the same
+	// shared context. Empty string when the owner hasn't set one; the daemon
+	// skips rendering the heading in that case.
+	if ws, err := h.Queries.GetWorkspace(r.Context(), parseUUID(resp.WorkspaceID)); err == nil {
+		if ws.Context.Valid {
+			resp.WorkspaceContext = ws.Context.String
+		}
+	} else {
+		slog.Warn("task claim: failed to load workspace for context injection",
+			"task_id", uuidToString(task.ID),
+			"workspace_id", resp.WorkspaceID,
+			"error", err,
+		)
 	}
 
 	slog.Info("task claimed by runtime", "task_id", uuidToString(task.ID), "runtime_id", runtimeID, "agent_id", uuidToString(task.AgentID), "prior_session", resp.PriorSessionID)

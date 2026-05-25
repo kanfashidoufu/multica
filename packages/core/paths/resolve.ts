@@ -3,16 +3,27 @@ import { useAuthStore } from "../auth";
 import { paths } from "./paths";
 
 /**
- * Priority:
- *   has workspace                         → /<first.slug>/issues
- *   zero workspaces                       → /workspaces/new
+ * Priority (onboarded-first):
+ *   !hasOnboarded               → /onboarding
+ *   hasOnboarded + workspace[0] → /<first.slug>/issues
+ *   hasOnboarded + no workspace → /workspaces/new
  *
- * First-run onboarding is intentionally bypassed. New users go straight to
- * workspace creation, and users with an existing workspace go straight to
- * their first workspace.
+ * V3 invariant: `onboarded_at != null` is the single source of truth for
+ * "may access /<slug>/*". The web workspace layout and the desktop App.tsx
+ * overlay decision both gate on this — sending an un-onboarded user
+ * straight to /issues would just be redirected back to /onboarding by
+ * the layout gate, costing a navigation round-trip. Check onboarded
+ * first.
  *
- * Callers that need invitation-aware routing (callback / login) handle the
- * "un-onboarded with pending invites" branch themselves before calling
+ * In v3 "has workspace but !onboarded" is physically rare (a user can
+ * only land in that state by closing the app between Step 2 and Step 3
+ * — both questionnaire and runtime picker steps run after workspace
+ * creation but before CompleteOnboarding). OnboardingFlow's Step 2
+ * already recognizes existing workspaces and offers "Continue with
+ * {name}", so the recovery is seamless.
+ *
+ * Callers that need invitation-aware routing (callback / login) handle
+ * the "un-onboarded with pending invites" branch themselves before calling
  * this resolver — this resolver only deals with the post-invite-check
  * destination.
  */

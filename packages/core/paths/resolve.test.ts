@@ -19,24 +19,28 @@ function makeWs(slug: string): Workspace {
 }
 
 describe("resolvePostAuthDestination", () => {
-  it("!onboarded + zero workspaces → /workspaces/new", () => {
-    expect(resolvePostAuthDestination([], false)).toBe(paths.newWorkspace());
+  it("!onboarded → /onboarding (even with a workspace)", () => {
+    // V3 invariant: onboarded_at is the single source of truth for
+    // workspace access. A user holding workspaces but flagged !onboarded
+    // (rare mid-flow state: closed app between Step 2 and Step 3) gets
+    // routed to /onboarding so they can finish; the layout hard gate
+    // would redirect them anyway.
+    const ws = [makeWs("acme")];
+    expect(resolvePostAuthDestination(ws, false)).toBe(paths.onboarding());
+    expect(resolvePostAuthDestination([], false)).toBe(paths.onboarding());
   });
 
-  it("!onboarded + has workspace → /<first.slug>/issues", () => {
-    expect(resolvePostAuthDestination([makeWs("acme")], false)).toBe(
-      paths.workspace("acme").issues(),
-    );
-  });
-
-  it("onboarded + has workspace → /<first.slug>/issues", () => {
+  it("onboarded + workspace[0] → /<first.slug>/issues", () => {
     const ws = [makeWs("acme"), makeWs("beta")];
     expect(resolvePostAuthDestination(ws, true)).toBe(
       paths.workspace("acme").issues(),
     );
   });
 
-  it("onboarded + zero workspaces → /workspaces/new", () => {
+  it("onboarded + no workspace → /workspaces/new", () => {
+    // Already-onboarded user without any workspace — usually a returning
+    // user whose last workspace got deleted or who left it. They skip
+    // re-onboarding and go straight to workspace creation.
     expect(resolvePostAuthDestination([], true)).toBe(paths.newWorkspace());
   });
 });

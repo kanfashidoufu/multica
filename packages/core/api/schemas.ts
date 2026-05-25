@@ -206,17 +206,6 @@ export const ChildIssuesResponseSchema = z.object({
   issues: z.array(IssueSchema).default([]),
 }).loose();
 
-export const OnboardingRuntimeBootstrapResponseSchema = z.object({
-  workspace_id: z.string(),
-  agent_id: z.string(),
-  issue_id: z.string(),
-}).loose();
-
-export const OnboardingNoRuntimeBootstrapResponseSchema = z.object({
-  workspace_id: z.string(),
-  issue_id: z.string(),
-}).loose();
-
 export const CloudRuntimeNodeSchema = z.object({
   id: z.string(),
   owner_id: z.string(),
