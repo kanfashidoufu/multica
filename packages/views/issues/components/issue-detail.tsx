@@ -1674,6 +1674,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
 
         <div
           ref={setScrollContainerEl}
+          data-tab-scroll-root
           className="relative flex-1 overflow-y-auto"
         >
         <div className="mx-auto w-full max-w-4xl px-8 py-8">

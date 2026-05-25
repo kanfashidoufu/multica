@@ -114,6 +114,7 @@ export type {
   Squad,
   SquadMember,
   SquadMemberType,
+  SquadMemberPreview,
   SquadActivityLog,
   SquadActivityOutcome,
   CreateSquadRequest,

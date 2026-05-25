@@ -131,6 +131,8 @@ import {
   EMPTY_CREATE_AGENT_FROM_TEMPLATE_RESPONSE,
   EMPTY_GROUPED_ISSUES_RESPONSE,
   EMPTY_LIST_ISSUES_RESPONSE,
+  EMPTY_SQUAD,
+  EMPTY_SQUAD_LIST,
   EMPTY_SQUAD_MEMBER_STATUS_LIST,
   EMPTY_TIMELINE_ENTRIES,
   EMPTY_USER,
@@ -143,6 +145,8 @@ import {
   RuntimeUsageByAgentListSchema,
   RuntimeUsageByHourListSchema,
   RuntimeUsageListSchema,
+  SquadSchema,
+  SquadListSchema,
   SquadMemberStatusListResponseSchema,
   SubscribersListSchema,
   TimelineEntriesSchema,
@@ -1585,19 +1589,31 @@ export class ApiClient {
 
   // Squads
   async listSquads(): Promise<Squad[]> {
-    return this.fetch(`/api/squads`);
+    const raw = await this.fetch<unknown>(`/api/squads`);
+    return parseWithFallback(raw, SquadListSchema, EMPTY_SQUAD_LIST, {
+      endpoint: "GET /api/squads",
+    }) as Squad[];
   }
 
   async getSquad(id: string): Promise<Squad> {
-    return this.fetch(`/api/squads/${id}`);
+    const raw = await this.fetch<unknown>(`/api/squads/${id}`);
+    return parseWithFallback(raw, SquadSchema, EMPTY_SQUAD, {
+      endpoint: "GET /api/squads/:id",
+    }) as Squad;
   }
 
   async createSquad(data: { name: string; description?: string; leader_id: string; avatar_url?: string }): Promise<Squad> {
-    return this.fetch("/api/squads", { method: "POST", body: JSON.stringify(data) });
+    const raw = await this.fetch<unknown>("/api/squads", { method: "POST", body: JSON.stringify(data) });
+    return parseWithFallback(raw, SquadSchema, EMPTY_SQUAD, {
+      endpoint: "POST /api/squads",
+    }) as Squad;
   }
 
   async updateSquad(id: string, data: { name?: string; description?: string; instructions?: string; leader_id?: string; avatar_url?: string }): Promise<Squad> {
-    return this.fetch(`/api/squads/${id}`, { method: "PUT", body: JSON.stringify(data) });
+    const raw = await this.fetch<unknown>(`/api/squads/${id}`, { method: "PUT", body: JSON.stringify(data) });
+    return parseWithFallback(raw, SquadSchema, EMPTY_SQUAD, {
+      endpoint: "PUT /api/squads/:id",
+    }) as Squad;
   }
 
   async deleteSquad(id: string): Promise<void> {
