@@ -51,7 +51,8 @@ function AuthInitializer({ children }: { children: React.ReactNode }) {
         })();
       },
     });
-    initialize();
+
+    void initialize();
   }, [initialize, qc]);
 
   return <>{children}</>;

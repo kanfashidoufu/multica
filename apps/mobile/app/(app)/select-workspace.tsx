@@ -1,6 +1,6 @@
 import { ActivityIndicator, ScrollView, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { router } from "expo-router";
 import { Text } from "@/components/ui/text";
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,7 @@ export default function SelectWorkspace() {
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
   const setCurrentWorkspace = useWorkspaceStore((s) => s.setCurrentWorkspace);
+  const qc = useQueryClient();
   const { data, isLoading, error, refetch } = useQuery(workspaceListOptions());
 
   const onSelect = async (id: string, slug: string) => {
@@ -79,7 +80,14 @@ export default function SelectWorkspace() {
         </View>
 
         <View className="pt-4 border-t border-border">
-          <Button variant="outline" onPress={() => logout()}>
+          <Button
+            variant="outline"
+            onPress={async () => {
+              await logout();
+              qc.clear();
+              router.replace("/login");
+            }}
+          >
             <Text>Sign out</Text>
           </Button>
         </View>

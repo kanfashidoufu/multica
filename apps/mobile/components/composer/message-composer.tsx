@@ -70,6 +70,12 @@ export interface MessageComposerReplyTarget {
   preview: string;
 }
 
+interface UploadContext {
+  issueId?: string;
+  commentId?: string;
+  chatSessionId?: string;
+}
+
 interface Props {
   /** Submit callback. Composer awaits this; on rejection it restores text,
    *  attachments, and mentions so the user can retry without losing
@@ -86,9 +92,14 @@ interface Props {
   mentionPickerPath: Href;
 
   /** Attachment upload context — forwarded to `api.uploadFile`. Comment
-   *  passes `issueId`; chat omits both (uploads are session-scoped via
-   *  the message id assigned by the server post-send). */
-  uploadContext?: { issueId?: string; commentId?: string };
+   *  passes `issueId`; chat supplies `chatSessionId` through
+   *  `resolveUploadContext`. */
+  uploadContext?: UploadContext;
+
+  /** Optional async context resolver for flows that must create a container
+   *  before upload. Chat mirrors web here: ensure the session exists, then
+   *  upload with `chatSessionId` so the server can back-fill message linkage. */
+  resolveUploadContext?: () => Promise<UploadContext | undefined>;
 
   placeholder?: string;
   pillLabel?: string;
@@ -158,6 +169,7 @@ export function MessageComposer({
   onSubmit,
   mentionPickerPath,
   uploadContext,
+  resolveUploadContext,
   placeholder = "Type a message…",
   pillLabel = "Type a message…",
   pillIcon = "chatbubble-ellipses-outline",
@@ -310,7 +322,10 @@ export function MessageComposer({
       asset: { uri: string; name: string; type: string },
     ) => {
       try {
-        const result = await api.uploadFile(asset, uploadContext);
+        const context = resolveUploadContext
+          ? await resolveUploadContext()
+          : uploadContext;
+        const result = await api.uploadFile(asset, context);
         setAttachments((prev) =>
           prev.map((it) =>
             it.localId === localId
@@ -335,7 +350,7 @@ export function MessageComposer({
         );
       }
     },
-    [uploadContext],
+    [resolveUploadContext, uploadContext],
   );
 
   const onImagePress = useCallback(async () => {

@@ -15,7 +15,7 @@
 import { Alert, ActivityIndicator, Pressable, ScrollView, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Workspace } from "@multica/core/types";
 import { Text } from "@/components/ui/text";
 import { Button } from "@/components/ui/button";
@@ -54,7 +54,7 @@ export default function SettingsPage() {
   const logout = useAuthStore((s) => s.logout);
   const currentSlug = useWorkspaceStore((s) => s.currentWorkspaceSlug);
   const setCurrentWorkspace = useWorkspaceStore((s) => s.setCurrentWorkspace);
-  const clearWorkspace = useWorkspaceStore((s) => s.clear);
+  const qc = useQueryClient();
   const { data, isLoading, error } = useQuery(workspaceListOptions());
   const { preference, setPreference, colorScheme } = useColorScheme();
   const mutedFg = THEME[colorScheme].mutedForeground;
@@ -75,8 +75,9 @@ export default function SettingsPage() {
           text: "Sign out",
           style: "destructive",
           onPress: async () => {
-            await clearWorkspace();
             await logout();
+            qc.clear();
+            router.replace("/login");
           },
         },
       ],

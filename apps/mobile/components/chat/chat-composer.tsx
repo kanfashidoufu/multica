@@ -15,10 +15,9 @@
  *     Issues (useful for "reference this ticket for context").
  *   - **No reply target**: chat is a flat conversation; passes no
  *     reply chip.
- *   - **No upload context**: chat attachments are session-scoped; the
- *     server back-fills `chat_message_id` on each row when the message
- *     persists (server-side). `MessageComposer` calls `api.uploadFile`
- *     without `{ issueId, commentId }`.
+ *   - **Upload context**: attachment pick first ensures a chat session
+ *     exists, then uploads with `chatSessionId` so the server can back-fill
+ *     `chat_message_id` when the message persists.
  *   - **Parent owns keyboard**: chat.tsx wraps in KeyboardAvoidingView +
  *     SafeAreaView, so `manageKeyboard={false}` prevents the composer
  *     from double-stacking its own keyboard handling.
@@ -29,7 +28,6 @@
 import { useCallback } from "react";
 import { Pressable, View } from "react-native";
 import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
-import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { MessageComposer } from "@/components/composer/message-composer";
 import { useWorkspaceStore } from "@/data/workspace-store";
@@ -47,6 +45,9 @@ interface Props {
   onSend: (content: string, attachmentIds: string[]) => Promise<void> | void;
   /** Cancel the in-flight agent task. Only callable while `sending===true`. */
   onStop: () => void;
+  /** Ensures a session exists before uploading attachments. Mirrors web's
+   *  chat-window upload flow so attachments are session-scoped. */
+  resolveUploadContext?: () => Promise<{ chatSessionId: string } | undefined>;
   /** True while an agent task is running for the active session. The
    *  composer swaps Send for Stop. */
   sending: boolean;
@@ -64,6 +65,7 @@ export function ChatComposer({
   onChangeText,
   onSend,
   onStop,
+  resolveUploadContext,
   sending,
   disabled = false,
   disabledReason,
@@ -112,6 +114,7 @@ export function ChatComposer({
       pillIcon="chatbubble-ellipses-outline"
       disabled={disabled}
       disabledReason={disabledReason}
+      resolveUploadContext={resolveUploadContext}
       isSending={sending}
       renderStop={() => <StopButton onPress={handleStop} />}
       manageKeyboard={false}

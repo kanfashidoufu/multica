@@ -114,8 +114,11 @@ import {
   SquadListSchema,
   TaskMessageListSchema,
   EMPTY_TASK_MESSAGE_LIST,
+  AppConfigSchema,
+  EMPTY_APP_CONFIG,
   UserSchema,
   WorkspaceListSchema,
+  type AppConfig,
 } from "./schemas";
 import type { ZodType } from "zod";
 import { getCurrentSlug } from "./workspace-store";
@@ -374,6 +377,15 @@ class ApiClient {
       method: "POST",
       body: JSON.stringify({ email, code }),
     });
+  }
+
+  async getConfig(opts?: { signal?: AbortSignal }): Promise<AppConfig> {
+    return this.fetchValidated(
+      "/api/config",
+      AppConfigSchema,
+      EMPTY_APP_CONFIG,
+      { ...opts, endpoint: "GET /api/config" },
+    );
   }
 
   async getMe(opts?: { signal?: AbortSignal }): Promise<User> {
@@ -1186,7 +1198,7 @@ class ApiClient {
    */
   async uploadFile(
     asset: FileAsset,
-    opts?: { issueId?: string; commentId?: string },
+    opts?: { issueId?: string; commentId?: string; chatSessionId?: string },
   ): Promise<Attachment> {
     const rid = createRequestId();
     const start = Date.now();
@@ -1212,6 +1224,9 @@ class ApiClient {
     );
     if (opts?.issueId) formData.append("issue_id", opts.issueId);
     if (opts?.commentId) formData.append("comment_id", opts.commentId);
+    if (opts?.chatSessionId) {
+      formData.append("chat_session_id", opts.chatSessionId);
+    }
 
     console.log(`[api] → POST ${path}`, { rid, filename: asset.name });
 

@@ -1,6 +1,6 @@
 /**
  * Mobile auth store — Zustand. Logic mirrors packages/core/auth/store.ts:
- *   - Token written ONLY on successful verifyCode
+ *   - Token written ONLY on successful verifyCode / native handoff
  *   - 401 → clear token; non-401 (5xx / network blip) → preserve token so
  *     the next launch can retry
  *   - logout = clear token + clear in-memory user + setToken(null)
@@ -21,6 +21,7 @@ interface AuthState {
   initialize: () => Promise<void>;
   sendCode: (email: string) => Promise<void>;
   verifyCode: (email: string, code: string) => Promise<User>;
+  loginWithToken: (token: string) => Promise<User>;
   logout: () => Promise<void>;
   /** Overwrite the in-memory user — call after PATCH /api/me so name/avatar
    *  edits land without a refetch. Server response is the source of truth. */
@@ -65,14 +66,31 @@ export const useAuthStore = create<AuthState>((set) => ({
     const { token, user } = await api.verifyCode(email, code);
     await setToken(token);
     api.setToken(token);
-    set({ user });
+    set({ user, isLoading: false });
     return user;
+  },
+
+  loginWithToken: async (token) => {
+    await useWorkspaceStore.getState().restoreSlug();
+    await setToken(token);
+    api.setToken(token);
+    try {
+      const user = await api.getMe();
+      set({ user, isLoading: false });
+      return user;
+    } catch (err) {
+      await clearToken();
+      api.setToken(null);
+      set({ user: null, isLoading: false });
+      throw err;
+    }
   },
 
   logout: async () => {
     await clearToken();
     api.setToken(null);
-    set({ user: null });
+    await useWorkspaceStore.getState().clear();
+    set({ user: null, isLoading: false });
   },
 
   setUser: (user) => set({ user }),

@@ -51,7 +51,9 @@ function CallbackContent() {
     const state = searchParams.get("state") || "";
     const stateParts = state.split(",");
     const provider = searchParams.get("provider") === "lark" ? "lark" : "google";
-    const isDesktop = stateParts.includes("platform:desktop");
+    const isAppHandoff =
+      stateParts.includes("platform:desktop") ||
+      stateParts.includes("platform:mobile");
     const nextPart = stateParts.find((p) => p.startsWith("next:"));
     const cliPart = stateParts.find((p) => p.startsWith("cli:"));
     const cliStatePart = stateParts.find((p) => p.startsWith("cli_state:"));
@@ -96,8 +98,8 @@ function CallbackContent() {
       return;
     }
 
-    if (isDesktop) {
-      // Desktop flow: exchange code for token, then redirect via deep link
+    if (isAppHandoff) {
+      // Native app flow: exchange code for token, then redirect via deep link
       oauthLogin(code, redirectUri)
         .then(({ token }) => {
           setDesktopToken(token);
@@ -163,7 +165,7 @@ function CallbackContent() {
           <CardHeader className="text-center">
             <CardTitle className="text-2xl">Opening Multica</CardTitle>
             <CardDescription>
-              You should see a prompt to open the Multica desktop app. If
+              You should see a prompt to open Multica. If
               nothing happens, click the button below.
             </CardDescription>
           </CardHeader>
@@ -174,7 +176,7 @@ function CallbackContent() {
                 window.location.href = `multica://auth/callback?token=${encodeURIComponent(desktopToken)}`;
               }}
             >
-              Open Multica Desktop
+              Open Multica
             </Button>
           </CardContent>
         </Card>

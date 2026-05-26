@@ -36,6 +36,7 @@ export interface FileAttachResult {
 export interface UploadContext {
   issueId?: string;
   commentId?: string;
+  chatSessionId?: string;
 }
 
 interface PickedAsset extends FileAsset {

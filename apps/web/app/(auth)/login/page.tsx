@@ -69,7 +69,14 @@ function LoginPageContent() {
   const cliCallbackRaw = searchParams.get("cli_callback");
   const cliState = searchParams.get("cli_state") || "";
   const platform = searchParams.get("platform");
-  const isDesktopHandoff = platform === "desktop" && !cliCallbackRaw;
+  const isAppHandoff =
+    (platform === "desktop" || platform === "mobile") && !cliCallbackRaw;
+  const handoffState =
+    platform === "desktop"
+      ? "platform:desktop"
+      : platform === "mobile"
+        ? "platform:mobile"
+        : "";
   // `next` carries a protected URL the user was originally headed to
   // (e.g. /invite/{id}). With URL-driven workspaces there is no legacy
   // "/issues" default — if `next` is absent we decide after login based on
@@ -86,8 +93,8 @@ function LoginPageContent() {
   // the user arrived to authorize the CLI.
   useEffect(() => {
     if (isLoading || !user || cliCallbackRaw) return;
-    if (isDesktopHandoff) {
-      // Desktop opened the browser for login but the web session is already
+    if (isAppHandoff) {
+      // A native app opened the browser for login but the web session is already
       // authenticated — mint a bearer token from the cookie session and hand
       // it off via deep link instead of silently redirecting to the workspace.
       api
@@ -113,7 +120,7 @@ function LoginPageContent() {
     void resolveLoggedInDestination(qc, hasOnboarded, list).then((dest) =>
       router.replace(dest),
     );
-  }, [isLoading, user, router, nextUrl, cliCallbackRaw, isDesktopHandoff, hasOnboarded, qc]);
+  }, [isLoading, user, router, nextUrl, cliCallbackRaw, isAppHandoff, hasOnboarded, qc]);
 
   const handleSuccess = async () => {
     // Read the latest user snapshot directly — the closure's `hasOnboarded`
@@ -132,13 +139,13 @@ function LoginPageContent() {
   // Build Google OAuth state: encode platform + next URL so the callback
   // can redirect to the right place after login.
   const googleState = [
-    platform === "desktop" ? "platform:desktop" : "",
+    handoffState,
     nextUrl ? `next:${nextUrl}` : "",
   ]
     .filter(Boolean)
     .join(",") || undefined;
   const larkState = [
-    platform === "desktop" ? "platform:desktop" : "",
+    handoffState,
     nextUrl ? `next:${encodeURIComponent(nextUrl)}` : "",
     cliCallbackRaw && validateCliCallback(cliCallbackRaw)
       ? `cli:${encodeURIComponent(cliCallbackRaw)}`
@@ -148,10 +155,10 @@ function LoginPageContent() {
     .filter(Boolean)
     .join(",") || undefined;
 
-  // While the desktop handoff is in progress (or has produced a token/error),
+  // While the native app handoff is in progress (or has produced a token/error),
   // render a dedicated screen instead of flashing the login form or redirecting
   // away to a workspace page.
-  if (isDesktopHandoff && user) {
+  if (isAppHandoff && user) {
     if (desktopError) {
       return (
         <div className="flex min-h-screen items-center justify-center">

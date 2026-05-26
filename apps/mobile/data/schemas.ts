@@ -39,6 +39,27 @@ import type {
 } from "@multica/core/types";
 import { IssueSchema } from "@multica/core/api/schemas";
 
+export const AppConfigSchema = z.object({
+  cdn_domain: z.string().default(""),
+  allow_signup: z.boolean().default(true),
+  google_client_id: z.string().optional(),
+  lark_auth_enabled: z.boolean().default(false),
+  lark_app_id: z.string().optional(),
+  lark_authorize_url: z.string().optional(),
+  release_repository: z.string().optional(),
+  posthog_key: z.string().optional(),
+  posthog_host: z.string().optional(),
+  analytics_environment: z.string().optional(),
+}).loose();
+
+export type AppConfig = z.infer<typeof AppConfigSchema>;
+
+export const EMPTY_APP_CONFIG: AppConfig = {
+  cdn_domain: "",
+  allow_signup: true,
+  lark_auth_enabled: false,
+};
+
 /** Upload response. Only fields mobile actually consumes — `url` to put
  *  into the markdown link, `filename` for the `[📎 name](url)` form, `id`
  *  for future linking. `.loose()` so the server can add fields without

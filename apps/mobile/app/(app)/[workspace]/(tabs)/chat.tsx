@@ -238,6 +238,22 @@ export default function ChatTab() {
     [activeSessionId, currentAgent, createSession],
   );
 
+  const resolveUploadContext = useCallback(async () => {
+    const isNewSession = !activeSessionId;
+    const sessionId = await ensureSession(draft);
+    if (!sessionId) return undefined;
+
+    qc.setQueryData<ChatMessage[]>(
+      chatKeys.messages(sessionId),
+      (old) => old ?? [],
+    );
+    if (isNewSession) {
+      promoteNewDraft(sessionId);
+      setActiveSessionId(sessionId);
+    }
+    return { chatSessionId: sessionId };
+  }, [activeSessionId, draft, ensureSession, promoteNewDraft, qc]);
+
   const handleSend = useCallback(
     async (content: string, attachmentIds: string[] = []) => {
       if (!currentAgent) return;
@@ -410,6 +426,7 @@ export default function ChatTab() {
           onChangeText={(next) => setDraft(draftKey, next)}
           onSend={handleSend}
           onStop={handleStop}
+          resolveUploadContext={resolveUploadContext}
           sending={sending}
           disabled={disabled}
           disabledReason={disabledReason}
