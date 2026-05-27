@@ -59,11 +59,12 @@ import { LabelChip } from "../../labels/label-chip";
 import {
   SORT_OPTIONS,
   GROUPING_OPTIONS,
+  SWIMLANE_GROUPINGS,
   CARD_PROPERTY_OPTIONS,
   type ActorFilterValue,
 } from "@multica/core/issues/stores/view-store";
 import { useViewStore, useViewStoreApi } from "@multica/core/issues/stores/view-store-context";
-import type { SortField, IssueGrouping, ViewMode } from "@multica/core/issues/stores/view-store";
+import type { SortField, IssueGrouping, SwimlaneGrouping, ViewMode } from "@multica/core/issues/stores/view-store";
 import {
   useIssuesScopeStore,
   type IssuesScope,
@@ -602,6 +603,7 @@ export function IssueDisplayControls({
   const sortBy = useViewStore((s) => s.sortBy);
   const sortDirection = useViewStore((s) => s.sortDirection);
   const grouping = useViewStore((s) => s.grouping);
+  const swimlaneGrouping = useViewStore((s) => s.swimlaneGrouping);
   const cardProperties = useViewStore((s) => s.cardProperties);
   const act = useViewStoreApi().getState();
 
@@ -631,6 +633,11 @@ export function IssueDisplayControls({
     status: "group_status",
     assignee: "group_assignee",
   };
+  const SWIMLANE_GROUPING_LABEL_KEY: Record<SwimlaneGrouping, "group_parent" | "group_project" | "group_assignee"> = {
+    parent: "group_parent",
+    project: "group_project",
+    assignee: "group_assignee",
+  };
   const CARD_PROPERTY_LABEL_KEY: Record<typeof CARD_PROPERTY_OPTIONS[number]["key"], "card_priority" | "card_description" | "card_assignee" | "card_start_date" | "card_due_date" | "card_project" | "card_labels" | "card_child_progress"> = {
     priority: "card_priority",
     description: "card_description",
@@ -643,6 +650,7 @@ export function IssueDisplayControls({
   };
   const sortLabel = t(($) => $.display[SORT_LABEL_KEY[sortBy]]);
   const groupingLabel = t(($) => $.display[GROUPING_LABEL_KEY[grouping]]);
+  const swimlaneGroupingLabel = t(($) => $.display[SWIMLANE_GROUPING_LABEL_KEY[swimlaneGrouping]]);
 
   return (
     <div className="flex items-center gap-1">
@@ -903,6 +911,41 @@ export function IssueDisplayControls({
                         {GROUPING_OPTIONS.map((opt) => (
                           <DropdownMenuRadioItem key={opt.value} value={opt.value}>
                             {t(($) => $.display[GROUPING_LABEL_KEY[opt.value]])}
+                          </DropdownMenuRadioItem>
+                        ))}
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              </div>
+            )}
+            {viewMode === "swimlane" && (
+              <div className="border-b px-3 py-2.5">
+                <span className="text-xs font-medium text-muted-foreground">
+                  {t(($) => $.display.grouping_section)}
+                </span>
+                <div className="mt-2">
+                  <DropdownMenu>
+                    <DropdownMenuTrigger
+                      render={
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="w-full justify-between text-xs"
+                        >
+                          {swimlaneGroupingLabel}
+                          <ChevronDown className="size-3 text-muted-foreground" />
+                        </Button>
+                      }
+                    />
+                    <DropdownMenuContent align="start" className="w-auto">
+                      <DropdownMenuRadioGroup
+                        value={swimlaneGrouping}
+                        onValueChange={(v) => act.setSwimlaneGrouping(v as SwimlaneGrouping)}
+                      >
+                        {SWIMLANE_GROUPINGS.map((value) => (
+                          <DropdownMenuRadioItem key={value} value={value}>
+                            {t(($) => $.display[SWIMLANE_GROUPING_LABEL_KEY[value]])}
                           </DropdownMenuRadioItem>
                         ))}
                       </DropdownMenuRadioGroup>

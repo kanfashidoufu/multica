@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { useEffect, useRef, useCallback, useMemo } from "react";
 import {
   useQuery,
   useQueryClient,
@@ -67,8 +67,6 @@ export function useIssueTimeline(issueId: string, userId?: string) {
   const { data, isLoading: loading } = query;
 
   const timeline = useMemo<TimelineEntry[]>(() => data ?? [], [data]);
-
-  const [submitting, setSubmitting] = useState(false);
 
   // Stable mutation handles. TanStack v5 returns a fresh result wrapper from
   // useMutation per render, but the inner mutateAsync / mutate functions are
@@ -262,8 +260,7 @@ export function useIssueTimeline(issueId: string, userId?: string) {
 
   const submitComment = useCallback(
     async (content: string, attachmentIds?: string[]) => {
-      if (!content.trim() || submitting || !userId) return;
-      setSubmitting(true);
+      if (!content.trim() || !userId) return;
       try {
         await createComment({ content, attachmentIds });
       } catch (err) {
@@ -272,11 +269,9 @@ export function useIssueTimeline(issueId: string, userId?: string) {
             ? err.message
             : t(($) => $.comment.send_failed),
         );
-      } finally {
-        setSubmitting(false);
       }
     },
-    [userId, submitting, createComment, t],
+    [userId, createComment, t],
   );
 
   const submitReply = useCallback(
@@ -301,7 +296,7 @@ export function useIssueTimeline(issueId: string, userId?: string) {
   );
 
   const editComment = useCallback(
-    async (commentId: string, content: string, attachmentIds?: string[]) => {
+    async (commentId: string, content: string, attachmentIds: string[]) => {
       try {
         await updateComment({ commentId, content, attachmentIds });
       } catch (err) {
@@ -427,7 +422,6 @@ export function useIssueTimeline(issueId: string, userId?: string) {
   return {
     timeline: optimisticTimeline,
     loading,
-    submitting,
     submitComment,
     submitReply,
     editComment,

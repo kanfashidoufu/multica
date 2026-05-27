@@ -49,6 +49,7 @@ import { toast } from "sonner";
 import { StatusIcon, PriorityIcon, StatusPicker, PriorityPicker, StartDatePicker, DueDatePicker, AssigneePicker, LabelPicker } from ".";
 import { IssueActionsDropdown, useIssueActions } from "../actions";
 import { ProjectPicker } from "../../projects/components/project-picker";
+import { LocalDirectoryHint } from "../../projects/components/local-directory-hint";
 import { CommentCard } from "./comment-card";
 import { CommentInput } from "./comment-input";
 import { ResolvedThreadBar } from "./resolved-thread-bar";
@@ -1288,6 +1289,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       {/* Properties */}
       <div>
         <button
+          type="button"
           className={`flex w-full items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors mb-2 hover:bg-accent/70 ${propertiesOpen ? "" : "text-muted-foreground hover:text-foreground"}`}
           onClick={() => setPropertiesOpen(!propertiesOpen)}
         >
@@ -1409,6 +1411,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       {parentIssue && (
         <div>
           <button
+            type="button"
             className={`flex w-full items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors mb-2 hover:bg-accent/70 ${parentIssueOpen ? "" : "text-muted-foreground hover:text-foreground"}`}
             onClick={() => setParentIssueOpen(!parentIssueOpen)}
           >
@@ -1434,6 +1437,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       {githubSettings.prSidebar && (
         <div>
           <button
+            type="button"
             className={`flex w-full items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors mb-2 hover:bg-accent/70 ${pullRequestsOpen ? "" : "text-muted-foreground hover:text-foreground"}`}
             onClick={() => setPullRequestsOpen(!pullRequestsOpen)}
           >
@@ -1447,6 +1451,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       {/* Details */}
       <div>
         <button
+          type="button"
           className={`flex w-full items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors mb-2 hover:bg-accent/70 ${detailsOpen ? "" : "text-muted-foreground hover:text-foreground"}`}
           onClick={() => setDetailsOpen(!detailsOpen)}
         >
@@ -1476,6 +1481,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       {usage && usage.task_count > 0 && (
         <div>
           <button
+            type="button"
             className={`flex w-full items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors mb-2 hover:bg-accent/70 ${tokenUsageOpen ? "" : "text-muted-foreground hover:text-foreground"}`}
             onClick={() => setTokenUsageOpen(!tokenUsageOpen)}
           >
@@ -1905,6 +1911,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
               </div>
               <div className="flex items-center gap-2">
                 <button
+                  type="button"
                   onClick={handleToggleSubscribe}
                   className="text-xs text-muted-foreground hover:text-foreground transition-colors"
                 >
@@ -1943,6 +1950,8 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                 </Popover>
               </div>
             </div>
+
+            <LocalDirectoryHint projectId={issue?.project_id} />
 
             {/* Agent live output — sticky banner in the activity section,
                 keyed by issue id so switching issues remounts the card and

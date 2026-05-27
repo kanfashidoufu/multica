@@ -1,6 +1,6 @@
 {
   "page": {
-    "breadcrumb_title": "issue",
+    "breadcrumb_title": "Issues",
     "breadcrumb_workspace_fallback": "工作区",
     "empty_title": "还没有 issue",
     "empty_hint": "创建一个 issue 开始使用。",
@@ -59,6 +59,8 @@
     "descending_title": "降序",
     "group_status": "状态",
     "group_assignee": "负责人",
+    "group_parent": "父级 issue",
+    "group_project": "项目",
     "sort_manual": "手动",
     "sort_priority": "优先级",
     "sort_start_date": "开始日期",
@@ -125,6 +127,8 @@
   "swimlane": {
     "no_parent": "无父级",
     "other_parents": "其他父级",
+    "no_project": "无项目",
+    "no_assignee": "未指派",
     "open_parent": "打开父级 issue",
     "toggle_collapse": "切换泳道"
   },
@@ -296,6 +300,7 @@
   "agent_live": {
     "is_working": "{{name}} 正在处理",
     "is_queued": "{{name}} 排队中",
+    "is_waiting_local_directory": "{{name}} 正在等待本地目录",
     "queued_elapsed_prefix": "已排队 {{elapsed}}",
     "fallback_name": "智能体",
     "tool_count_other": "{{count}} 次工具调用",
@@ -324,6 +329,7 @@
     "trigger_initial": "首次运行",
     "status_queued": "排队中",
     "status_dispatched": "启动中",
+    "status_waiting_local_directory": "等待本地目录释放",
     "status_running": "处理中",
     "status_completed": "已完成",
     "status_failed": "失败",
