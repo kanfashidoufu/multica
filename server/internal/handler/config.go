@@ -20,6 +20,12 @@ type AppConfig struct {
 	LarkAppID         string `json:"lark_app_id,omitempty"`
 	LarkAuthorizeURL  string `json:"lark_authorize_url,omitempty"`
 	ReleaseRepository string `json:"release_repository,omitempty"`
+	// WorkspaceCreationDisabled mirrors the server-side
+	// DISABLE_WORKSPACE_CREATION env var so the UI can hide every
+	// "Create workspace" affordance on self-hosted instances. Omitted
+	// from the JSON when false to keep responses identical to the
+	// previous shape for the common managed-cloud case (#3433).
+	WorkspaceCreationDisabled bool `json:"workspace_creation_disabled,omitempty"`
 
 	// PostHog public config for the frontend. The key is the same Project
 	// API Key the backend uses; returning it here (instead of baking it
@@ -44,6 +50,7 @@ func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 		LarkAppID:         larkAppID,
 		LarkAuthorizeURL:  larkAuthorizeURL,
 		ReleaseRepository: publicReleaseRepository(),
+		WorkspaceCreationDisabled: os.Getenv("DISABLE_WORKSPACE_CREATION") == "true",
 	}
 	if h.Storage != nil {
 		config.CdnDomain = h.Storage.CdnDomain()

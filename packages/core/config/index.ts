@@ -9,6 +9,10 @@ interface ConfigState {
   larkAppId: string;
   larkAuthorizeUrl: string;
   releaseRepository: string;
+  // Self-host gate (#3433): when true, every "Create workspace" affordance
+  // must be hidden. Defaults to false so unknown / older servers behave like
+  // the managed-cloud case.
+  workspaceCreationDisabled: boolean;
   setCdnDomain: (domain: string) => void;
   setAuthConfig: (config: {
     allowSignup: boolean;
@@ -17,6 +21,7 @@ interface ConfigState {
     larkAppId?: string;
     larkAuthorizeUrl?: string;
     releaseRepository?: string;
+    workspaceCreationDisabled?: boolean;
   }) => void;
 }
 
@@ -28,6 +33,7 @@ export const configStore = createStore<ConfigState>((set) => ({
   larkAppId: "",
   larkAuthorizeUrl: "",
   releaseRepository: "",
+  workspaceCreationDisabled: false,
   setCdnDomain: (domain) => set({ cdnDomain: domain }),
   setAuthConfig: ({
     allowSignup,
@@ -36,6 +42,7 @@ export const configStore = createStore<ConfigState>((set) => ({
     larkAppId = "",
     larkAuthorizeUrl = "",
     releaseRepository = "",
+    workspaceCreationDisabled = false,
   }) =>
     set({
       allowSignup,
@@ -44,6 +51,7 @@ export const configStore = createStore<ConfigState>((set) => ({
       larkAppId,
       larkAuthorizeUrl,
       releaseRepository,
+      workspaceCreationDisabled,
     }),
 }));
 

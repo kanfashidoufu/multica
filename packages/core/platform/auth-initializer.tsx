@@ -57,6 +57,9 @@ export function AuthInitializer({
           larkAppId: cfg.lark_app_id,
           larkAuthorizeUrl: cfg.lark_authorize_url,
           releaseRepository: cfg.release_repository,
+          // Old servers omit this field — treat that as "creation allowed"
+          // (the managed-cloud default) rather than blocking the UI.
+          workspaceCreationDisabled: cfg.workspace_creation_disabled === true,
         });
         if (cfg.posthog_key) {
           initAnalytics({
