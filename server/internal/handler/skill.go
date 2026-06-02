@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -83,9 +85,31 @@ type SkillFileResponse struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
+type SkillSearchCandidateResponse struct {
+	Name         string  `json:"name"`
+	URL          string  `json:"url"`
+	Source       string  `json:"source"`
+	Repo         *string `json:"repo"`
+	InstallCount *int64  `json:"install_count"`
+	GitHubStars  *int64  `json:"github_stars"`
+	Description  string  `json:"description"`
+}
+
 type SkillWithFilesResponse struct {
 	SkillResponse
 	Files []SkillFileResponse `json:"files"`
+}
+
+type ExistingSkillIdentity struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func writeSkillImportDuplicateConflict(w http.ResponseWriter, existing ExistingSkillIdentity) {
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error":          "a skill with this name already exists",
+		"existing_skill": existing,
+	})
 }
 
 func skillToResponse(s db.Skill) SkillResponse {
@@ -100,6 +124,20 @@ func skillToResponse(s db.Skill) SkillResponse {
 		CreatedAt:   timestampToString(s.CreatedAt),
 		UpdatedAt:   timestampToString(s.UpdatedAt),
 	}
+}
+
+func (h *Handler) existingSkillIdentityByName(ctx context.Context, workspaceID pgtype.UUID, name string) (ExistingSkillIdentity, bool, error) {
+	skill, err := h.Queries.GetSkillByWorkspaceAndName(ctx, db.GetSkillByWorkspaceAndNameParams{
+		WorkspaceID: workspaceID,
+		Name:        name,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ExistingSkillIdentity{}, false, nil
+		}
+		return ExistingSkillIdentity{}, false, err
+	}
+	return ExistingSkillIdentity{ID: uuidToString(skill.ID), Name: skill.Name}, true, nil
 }
 
 // decodeSkillConfig decodes a JSONB skill.config blob, defaulting to {} when
@@ -232,6 +270,25 @@ func (h *Handler) ListSkills(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) SearchSkills(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if query == "" {
+		writeError(w, http.StatusBadRequest, "query is required")
+		return
+	}
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	candidates, err := searchClawHubSkills(httpClient, query)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"code":  "upstream_unavailable",
+			"error": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, candidates)
 }
 
 func (h *Handler) GetSkill(w http.ResponseWriter, r *http.Request) {
@@ -547,6 +604,26 @@ func isLikelyBinaryFilePath(path string) bool {
 
 // --- ClawHub types ---
 
+var clawHubAPIBase = "https://clawhub.ai/api/v1"
+
+const clawHubSearchStatsLimit = 10
+
+type clawhubSearchResponse struct {
+	Results []clawhubSearchResult `json:"results"`
+}
+
+type clawhubSearchResult struct {
+	Slug        string `json:"slug"`
+	DisplayName string `json:"displayName"`
+	Summary     string `json:"summary"`
+	OwnerHandle string `json:"ownerHandle"`
+}
+
+type clawhubSkillStats struct {
+	InstallsAllTime int64 `json:"installsAllTime"`
+	InstallsCurrent int64 `json:"installsCurrent"`
+}
+
 type clawhubGetSkillResponse struct {
 	Skill         clawhubSkill          `json:"skill"`
 	LatestVersion *clawhubLatestVersion `json:"latestVersion"`
@@ -557,6 +634,7 @@ type clawhubSkill struct {
 	DisplayName string            `json:"displayName"`
 	Summary     string            `json:"summary"`
 	Tags        map[string]string `json:"tags"`
+	Stats       clawhubSkillStats `json:"stats"`
 }
 
 type clawhubLatestVersion struct {
@@ -691,13 +769,83 @@ func parseClawHubSlug(raw string) (string, error) {
 	return "", fmt.Errorf("could not extract skill slug from URL: %s", raw)
 }
 
+func searchClawHubSkills(httpClient *http.Client, query string) ([]SkillSearchCandidateResponse, error) {
+	searchURL := clawHubAPIBase + "/search?q=" + url.QueryEscape(query)
+	resp, err := httpClient.Get(searchURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reach ClawHub: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ClawHub search returned status %d", resp.StatusCode)
+	}
+
+	var searchResp clawhubSearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
+		return nil, fmt.Errorf("failed to parse ClawHub search response")
+	}
+
+	candidates := make([]SkillSearchCandidateResponse, 0, len(searchResp.Results))
+	for i, result := range searchResp.Results {
+		if result.Slug == "" {
+			continue
+		}
+		candidate := SkillSearchCandidateResponse{
+			Name:        result.DisplayName,
+			URL:         buildClawHubSkillURL(result.OwnerHandle, result.Slug),
+			Source:      "clawhub.ai",
+			Description: result.Summary,
+		}
+		if candidate.Name == "" {
+			candidate.Name = result.Slug
+		}
+		if i < clawHubSearchStatsLimit {
+			if count, ok := fetchClawHubInstallCount(httpClient, result.Slug); ok {
+				candidate.InstallCount = &count
+			}
+		}
+		candidates = append(candidates, candidate)
+	}
+	return candidates, nil
+}
+
+func buildClawHubSkillURL(ownerHandle, slug string) string {
+	if ownerHandle == "" {
+		return "https://clawhub.ai/" + url.PathEscape(slug)
+	}
+	return "https://clawhub.ai/" + url.PathEscape(ownerHandle) + "/" + url.PathEscape(slug)
+}
+
+func fetchClawHubInstallCount(httpClient *http.Client, slug string) (int64, bool) {
+	detailURL := clawHubAPIBase + "/skills/" + url.PathEscape(slug)
+	resp, err := httpClient.Get(detailURL)
+	if err != nil {
+		slog.Warn("clawhub search: failed to fetch skill details", "slug", slug, "error", err)
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		slog.Warn("clawhub search: skill details returned non-200", "slug", slug, "status", resp.StatusCode)
+		return 0, false
+	}
+	var detail clawhubGetSkillResponse
+	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
+		slog.Warn("clawhub search: failed to parse skill details", "slug", slug, "error", err)
+		return 0, false
+	}
+	if detail.Skill.Stats.InstallsAllTime > 0 {
+		return detail.Skill.Stats.InstallsAllTime, true
+	}
+	return detail.Skill.Stats.InstallsCurrent, true
+}
+
 func fetchFromClawHub(httpClient *http.Client, rawURL string) (*importedSkill, error) {
 	slug, err := parseClawHubSlug(rawURL)
 	if err != nil {
 		return nil, err
 	}
 
-	apiBase := "https://clawhub.ai/api/v1"
+	apiBase := clawHubAPIBase
 
 	// 1. Fetch skill metadata
 	skillResp, err := httpClient.Get(apiBase + "/skills/" + url.PathEscape(slug))
@@ -1657,7 +1805,11 @@ func (h *Handler) ImportSkill(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if isUniqueViolation(err) {
-			writeError(w, http.StatusConflict, "a skill with this name already exists")
+			if existing, found, findErr := h.existingSkillIdentityByName(r.Context(), workspaceUUID, imported.name); findErr == nil && found {
+				writeSkillImportDuplicateConflict(w, existing)
+			} else {
+				writeError(w, http.StatusConflict, "a skill with this name already exists")
+			}
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to create skill: "+err.Error())

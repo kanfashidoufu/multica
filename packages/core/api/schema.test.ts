@@ -91,6 +91,34 @@ describe("ApiClient schema fallback", () => {
     });
   });
 
+  describe("getConfig", () => {
+    it("drops malformed daemon setup URLs instead of throwing", async () => {
+      stubFetchJson({
+        cdn_domain: "cdn.example.com",
+        allow_signup: true,
+        lark_auth_enabled: true,
+        lark_app_id: "cli_test",
+        lark_authorize_url: "https://open.larksuite.com/oauth",
+        release_repository: "example/multica",
+        daemon_server_url: { wrong: "shape" },
+        daemon_app_url: 123,
+        workspace_creation_disabled: false,
+      });
+      const client = new ApiClient("https://api.example.test");
+      const config = await client.getConfig();
+      expect(config.cdn_domain).toBe("cdn.example.com");
+      expect(config.allow_signup).toBe(true);
+      expect(config.lark_auth_enabled).toBe(true);
+      expect(config.lark_app_id).toBe("cli_test");
+      expect(config.lark_authorize_url).toBe(
+        "https://open.larksuite.com/oauth",
+      );
+      expect(config.release_repository).toBe("example/multica");
+      expect(config.daemon_server_url).toBeUndefined();
+      expect(config.daemon_app_url).toBeUndefined();
+    });
+  });
+
   describe("listGroupedIssues", () => {
     it("falls back to empty groups when the response is malformed", async () => {
       stubFetchJson({ groups: "not-an-array" });

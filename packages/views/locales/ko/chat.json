@@ -38,6 +38,22 @@
     },
     "row_delete_aria": "채팅 세션 삭제",
     "row_rename_aria": "채팅 세션 이름 변경",
+    "row_stop_aria": "현재 실행 중지",
+    "stop_action": "중지",
+    "row_subtitle": {
+      "working": "작업 중",
+      "completed": "완료됨",
+      "new_reply": "새 답변",
+      "archived_label": "보관됨"
+    },
+    "stop_dialog": {
+      "title": "이 실행을 중지할까요?",
+      "description_with_title": "\"{{title}}\"의 현재 에이전트 작업을 취소합니다. 이미 생성된 내용은 채팅에 남습니다.",
+      "description_default": "현재 에이전트 작업을 취소합니다. 이미 생성된 내용은 채팅에 남습니다.",
+      "cancel": "계속 실행",
+      "confirm": "실행 중지",
+      "confirming": "중지하는 중..."
+    },
     "delete_dialog": {
       "title": "채팅 세션 삭제",
       "description_with_title": "\"{{title}}\"과(와) 메시지가 영구 삭제됩니다. 이 작업은 되돌릴 수 없습니다.",
