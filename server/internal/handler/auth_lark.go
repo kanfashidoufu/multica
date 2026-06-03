@@ -13,6 +13,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/auth"
 	enterpriseLark "github.com/multica-ai/multica/server/internal/enterprise/lark"
 	"github.com/multica-ai/multica/server/internal/logger"
+	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -62,7 +63,7 @@ func (h *Handler) LarkLogin(w http.ResponseWriter, r *http.Request) {
 	if isNew {
 		evt := analytics.Signup(uuidToString(user.ID), user.Email, signupSourceFromRequest(r))
 		evt.Properties["auth_method"] = "lark"
-		h.Analytics.Capture(evt)
+		obsmetrics.RecordEvent(h.Analytics, h.Metrics, evt)
 	}
 
 	tokenString, err := h.issueJWT(user)
