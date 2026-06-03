@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 	"unicode"
 
 	"github.com/go-chi/chi/v5"
@@ -20,6 +19,8 @@ import (
 	"github.com/multica-ai/multica/server/internal/issueguard"
 	"github.com/multica-ai/multica/server/internal/issueposition"
 	"github.com/multica-ai/multica/server/internal/logger"
+	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
+	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/util"
 	"github.com/multica-ai/multica/server/pkg/agent"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -28,25 +29,25 @@ import (
 
 // IssueResponse is the JSON response for an issue.
 type IssueResponse struct {
-	ID            string                  `json:"id"`
-	WorkspaceID   string                  `json:"workspace_id"`
-	Number        int32                   `json:"number"`
-	Identifier    string                  `json:"identifier"`
-	Title         string                  `json:"title"`
-	Description   *string                 `json:"description"`
-	Status        string                  `json:"status"`
-	Priority      string                  `json:"priority"`
-	AssigneeType  *string                 `json:"assignee_type"`
-	AssigneeID    *string                 `json:"assignee_id"`
-	CreatorType   string                  `json:"creator_type"`
-	CreatorID     string                  `json:"creator_id"`
-	ParentIssueID *string                 `json:"parent_issue_id"`
-	ProjectID     *string                 `json:"project_id"`
-	Position      float64                 `json:"position"`
-	StartDate     *string                 `json:"start_date"`
-	DueDate       *string                 `json:"due_date"`
-	CreatedAt     string                  `json:"created_at"`
-	UpdatedAt     string                  `json:"updated_at"`
+	ID            string  `json:"id"`
+	WorkspaceID   string  `json:"workspace_id"`
+	Number        int32   `json:"number"`
+	Identifier    string  `json:"identifier"`
+	Title         string  `json:"title"`
+	Description   *string `json:"description"`
+	Status        string  `json:"status"`
+	Priority      string  `json:"priority"`
+	AssigneeType  *string `json:"assignee_type"`
+	AssigneeID    *string `json:"assignee_id"`
+	CreatorType   string  `json:"creator_type"`
+	CreatorID     string  `json:"creator_id"`
+	ParentIssueID *string `json:"parent_issue_id"`
+	ProjectID     *string `json:"project_id"`
+	Position      float64 `json:"position"`
+	StartDate     *string `json:"start_date"`
+	DueDate       *string `json:"due_date"`
+	CreatedAt     string  `json:"created_at"`
+	UpdatedAt     string  `json:"updated_at"`
 	// Metadata is the per-issue KV map (see issue_metadata.go). Always emitted
 	// (empty object when unset) so frontend code can `issue.metadata[key]`
 	// without nil-guarding the parent field.
@@ -80,8 +81,8 @@ func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 		ParentIssueID: uuidToPtr(i.ParentIssueID),
 		ProjectID:     uuidToPtr(i.ProjectID),
 		Position:      i.Position,
-		StartDate:     timestampToPtr(i.StartDate),
-		DueDate:       timestampToPtr(i.DueDate),
+		StartDate:     dateToPtr(i.StartDate),
+		DueDate:       dateToPtr(i.DueDate),
 		CreatedAt:     timestampToString(i.CreatedAt),
 		UpdatedAt:     timestampToString(i.UpdatedAt),
 		Metadata:      parseIssueMetadata(i.Metadata),
@@ -107,8 +108,8 @@ func issueListRowToResponse(i db.ListIssuesRow, issuePrefix string) IssueRespons
 		ParentIssueID: uuidToPtr(i.ParentIssueID),
 		ProjectID:     uuidToPtr(i.ProjectID),
 		Position:      i.Position,
-		StartDate:     timestampToPtr(i.StartDate),
-		DueDate:       timestampToPtr(i.DueDate),
+		StartDate:     dateToPtr(i.StartDate),
+		DueDate:       dateToPtr(i.DueDate),
 		CreatedAt:     timestampToString(i.CreatedAt),
 		UpdatedAt:     timestampToString(i.UpdatedAt),
 		Metadata:      parseIssueMetadata(i.Metadata),
@@ -164,8 +165,8 @@ func openIssueRowToResponse(i db.ListOpenIssuesRow, issuePrefix string) IssueRes
 		ParentIssueID: uuidToPtr(i.ParentIssueID),
 		ProjectID:     uuidToPtr(i.ProjectID),
 		Position:      i.Position,
-		StartDate:     timestampToPtr(i.StartDate),
-		DueDate:       timestampToPtr(i.DueDate),
+		StartDate:     dateToPtr(i.StartDate),
+		DueDate:       dateToPtr(i.DueDate),
 		CreatedAt:     timestampToString(i.CreatedAt),
 		UpdatedAt:     timestampToString(i.UpdatedAt),
 		Metadata:      parseIssueMetadata(i.Metadata),
@@ -2054,24 +2055,24 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var startDate pgtype.Timestamptz
+	var startDate pgtype.Date
 	if req.StartDate != nil && *req.StartDate != "" {
-		t, err := time.Parse(time.RFC3339, *req.StartDate)
+		d, err := util.ParseCalendarDate(*req.StartDate)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid start_date format, expected RFC3339")
+			writeError(w, http.StatusBadRequest, "invalid start_date format, expected YYYY-MM-DD")
 			return
 		}
-		startDate = pgtype.Timestamptz{Time: t, Valid: true}
+		startDate = d
 	}
 
-	var dueDate pgtype.Timestamptz
+	var dueDate pgtype.Date
 	if req.DueDate != nil && *req.DueDate != "" {
-		t, err := time.Parse(time.RFC3339, *req.DueDate)
+		d, err := util.ParseCalendarDate(*req.DueDate)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid due_date format, expected RFC3339")
+			writeError(w, http.StatusBadRequest, "invalid due_date format, expected YYYY-MM-DD")
 			return
 		}
-		dueDate = pgtype.Timestamptz{Time: t, Valid: true}
+		dueDate = d
 	}
 
 	// Use a transaction to atomically guard against active duplicates,
@@ -2248,7 +2249,8 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 			)
 		}
 	}
-	h.Analytics.Capture(analytics.IssueCreated(
+	platform, _, _ := middleware.ClientMetadataFromContext(r.Context())
+	obsmetrics.RecordEvent(h.Analytics, h.Metrics, analytics.IssueCreated(
 		analyticsActorID,
 		workspaceID,
 		uuidToString(issue.ID),
@@ -2256,6 +2258,7 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		analyticsTaskID,
 		analyticsAutopilotRunID,
 		analyticsSource,
+		platform,
 	))
 
 	// Enqueue agent task when an agent-assigned issue is created.
@@ -2366,26 +2369,26 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, ok := rawFields["start_date"]; ok {
 		if req.StartDate != nil && *req.StartDate != "" {
-			t, err := time.Parse(time.RFC3339, *req.StartDate)
+			d, err := util.ParseCalendarDate(*req.StartDate)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, "invalid start_date format, expected RFC3339")
+				writeError(w, http.StatusBadRequest, "invalid start_date format, expected YYYY-MM-DD")
 				return
 			}
-			params.StartDate = pgtype.Timestamptz{Time: t, Valid: true}
+			params.StartDate = d
 		} else {
-			params.StartDate = pgtype.Timestamptz{Valid: false} // explicit null = clear date
+			params.StartDate = pgtype.Date{Valid: false} // explicit null = clear date
 		}
 	}
 	if _, ok := rawFields["due_date"]; ok {
 		if req.DueDate != nil && *req.DueDate != "" {
-			t, err := time.Parse(time.RFC3339, *req.DueDate)
+			d, err := util.ParseCalendarDate(*req.DueDate)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, "invalid due_date format, expected RFC3339")
+				writeError(w, http.StatusBadRequest, "invalid due_date format, expected YYYY-MM-DD")
 				return
 			}
-			params.DueDate = pgtype.Timestamptz{Time: t, Valid: true}
+			params.DueDate = d
 		} else {
-			params.DueDate = pgtype.Timestamptz{Valid: false} // explicit null = clear date
+			params.DueDate = pgtype.Date{Valid: false} // explicit null = clear date
 		}
 	}
 	if _, ok := rawFields["parent_issue_id"]; ok {
@@ -2477,10 +2480,10 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	priorityChanged := req.Priority != nil && prevIssue.Priority != issue.Priority
 	descriptionChanged := req.Description != nil && textToPtr(prevIssue.Description) != resp.Description
 	titleChanged := req.Title != nil && prevIssue.Title != issue.Title
-	prevStartDate := timestampToPtr(prevIssue.StartDate)
+	prevStartDate := dateToPtr(prevIssue.StartDate)
 	startDateChanged := prevStartDate != resp.StartDate && (prevStartDate == nil) != (resp.StartDate == nil) ||
 		(prevStartDate != nil && resp.StartDate != nil && *prevStartDate != *resp.StartDate)
-	prevDueDate := timestampToPtr(prevIssue.DueDate)
+	prevDueDate := dateToPtr(prevIssue.DueDate)
 	dueDateChanged := prevDueDate != resp.DueDate && (prevDueDate == nil) != (resp.DueDate == nil) ||
 		(prevDueDate != nil && resp.DueDate != nil && *prevDueDate != *resp.DueDate)
 
@@ -2899,24 +2902,24 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, ok := rawUpdates["start_date"]; ok {
 			if req.Updates.StartDate != nil && *req.Updates.StartDate != "" {
-				t, err := time.Parse(time.RFC3339, *req.Updates.StartDate)
+				d, err := util.ParseCalendarDate(*req.Updates.StartDate)
 				if err != nil {
 					continue
 				}
-				params.StartDate = pgtype.Timestamptz{Time: t, Valid: true}
+				params.StartDate = d
 			} else {
-				params.StartDate = pgtype.Timestamptz{Valid: false}
+				params.StartDate = pgtype.Date{Valid: false}
 			}
 		}
 		if _, ok := rawUpdates["due_date"]; ok {
 			if req.Updates.DueDate != nil && *req.Updates.DueDate != "" {
-				t, err := time.Parse(time.RFC3339, *req.Updates.DueDate)
+				d, err := util.ParseCalendarDate(*req.Updates.DueDate)
 				if err != nil {
 					continue
 				}
-				params.DueDate = pgtype.Timestamptz{Time: t, Valid: true}
+				params.DueDate = d
 			} else {
-				params.DueDate = pgtype.Timestamptz{Valid: false}
+				params.DueDate = pgtype.Date{Valid: false}
 			}
 		}
 

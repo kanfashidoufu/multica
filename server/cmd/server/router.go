@@ -18,6 +18,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
+	"github.com/multica-ai/multica/server/internal/cloudruntime"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
@@ -98,9 +99,10 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 }
 
 type RouterOptions struct {
-	HTTPMetrics        *obsmetrics.HTTPMetrics
-	DaemonHub          *daemonws.Hub
-	DaemonWakeup       service.TaskWakeupNotifier
+	HTTPMetrics     *obsmetrics.HTTPMetrics
+	BusinessMetrics *obsmetrics.BusinessMetrics
+	DaemonHub       *daemonws.Hub
+	DaemonWakeup    service.TaskWakeupNotifier
 	InvitationNotifier handler.InvitationNotifier
 	// HeartbeatScheduler, when non-nil, replaces the default synchronous
 	// passthrough scheduler on the constructed Handler. main.go injects a
@@ -148,6 +150,16 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
 	h.InvitationNotifier = opts.InvitationNotifier
+	h.Metrics = opts.BusinessMetrics
+	h.TaskService.Metrics = opts.BusinessMetrics
+	if opts.BusinessMetrics != nil {
+		// Wire the BusinessMetrics receiver into the cloud runtime client
+		// so every outbound Fleet/Gateway request feeds the
+		// multica_cloudruntime_request_* histograms.
+		if client, ok := h.CloudRuntime.(*cloudruntime.Client); ok {
+			client.SetRecorder(opts.BusinessMetrics)
+		}
+	}
 	if opts.DaemonWakeup != nil {
 		h.TaskService.Wakeup = opts.DaemonWakeup
 	}
@@ -715,6 +727,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Delete("/", h.DeleteChatSession)
 					r.Post("/messages", h.SendChatMessage)
 					r.Get("/messages", h.ListChatMessages)
+					r.Get("/messages/page", h.ListChatMessagesPage)
 					r.Get("/pending-task", h.GetPendingChatTask)
 					r.Post("/read", h.MarkChatSessionRead)
 				})

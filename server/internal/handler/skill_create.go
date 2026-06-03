@@ -3,9 +3,9 @@ package handler
 import (
 	"context"
 	"encoding/json"
-	"strings"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	skillpkg "github.com/multica-ai/multica/server/internal/skill"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -49,7 +49,7 @@ func createSkillWithFilesInTx(ctx context.Context, qtx *db.Queries, input skillC
 	for _, f := range input.Files {
 		// SKILL.md is reserved for the primary skill content (skill.Content).
 		// Supporting files must carry additional assets, not duplicate the main file.
-		if strings.EqualFold(f.Path, "SKILL.md") {
+		if skillpkg.IsReservedContentPath(f.Path) {
 			continue
 		}
 		sf, err := qtx.UpsertSkillFile(ctx, db.UpsertSkillFileParams{

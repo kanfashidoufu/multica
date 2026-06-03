@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { motion } from "motion/react";
 import { Minus, Maximize2, Minimize2, ChevronDown, Plus, Check, Trash2, Pencil, Loader2, Square } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
@@ -33,7 +33,7 @@ import { OfflineBanner } from "./offline-banner";
 import { NoAgentBanner } from "./no-agent-banner";
 import {
   chatSessionsOptions,
-  chatMessagesOptions,
+  chatMessagesPageOptions,
   pendingChatTaskOptions,
   pendingChatTasksOptions,
   chatKeys,
@@ -56,11 +56,31 @@ import {
 import { ChatResizeHandles } from "./chat-resize-handles";
 import { useChatResize } from "./use-chat-resize";
 import { createLogger } from "@multica/core/logger";
-import type { Agent, ChatMessage, ChatPendingTask, ChatSession, PendingChatTasksResponse } from "@multica/core/types";
+import type { Agent, ChatMessage, ChatMessagesPage, ChatPendingTask, ChatSession, PendingChatTasksResponse } from "@multica/core/types";
 import { useT } from "../../i18n";
 
 const uiLogger = createLogger("chat.ui");
 const apiLogger = createLogger("chat.api");
+const CHAT_VIRTUOSO_INITIAL_FIRST_ITEM_INDEX = 1_000_000;
+
+function seedChatMessagesPageCache(
+  qc: ReturnType<typeof useQueryClient>,
+  sessionId: string,
+  messages: ChatMessage[],
+) {
+  qc.setQueryData<InfiniteData<ChatMessagesPage>>(
+    chatKeys.messagesPage(sessionId),
+    (old) => old ?? {
+      pages: [{
+        messages,
+        limit: 50,
+        has_more: false,
+        next_cursor: null,
+      }],
+      pageParams: [null],
+    },
+  );
+}
 
 export function ChatWindow() {
   const { t } = useT("chat");
@@ -77,11 +97,25 @@ export function ChatWindow() {
   // Single sessions cache — eliminates the separate active/all queries
   // that used to drift during the WS-invalidate window.
   const { data: sessions = [] } = useQuery(chatSessionsOptions(wsId));
-  const { data: rawMessages, isLoading: messagesLoading } = useQuery(
-    chatMessagesOptions(activeSessionId ?? ""),
-  );
-  // When no active session, always show empty — don't use stale cache
-  const messages = activeSessionId ? rawMessages ?? [] : [];
+  const {
+    data: rawMessagePages,
+    isLoading: messagesLoading,
+    fetchNextPage: fetchOlderMessages,
+    hasNextPage: hasOlderMessages,
+    isFetchingNextPage: isFetchingOlderMessages,
+  } = useInfiniteQuery(chatMessagesPageOptions(activeSessionId ?? ""));
+  // When no active session, always show empty — don't use stale cache.
+  // Page 0 contains the latest chronological window; later cursor pages are
+  // older chronological windows. Reverse pages so older fetched pages render
+  // above the initial latest page. The Virtuoso firstItemIndex is client-owned:
+  // it starts from a large stable base and only subtracts the count of loaded
+  // prepended rows, so concurrent server inserts cannot drift the scroll anchor.
+  const messagePages = activeSessionId ? rawMessagePages?.pages ?? [] : [];
+  const messages = [...messagePages].reverse().flatMap((page) => page.messages);
+  const olderMessageCount = messagePages.slice(1).reduce((sum, page) => sum + page.messages.length, 0);
+  const firstItemIndex = messages.length > 0
+    ? CHAT_VIRTUOSO_INITIAL_FIRST_ITEM_INDEX - olderMessageCount
+    : 0;
   // Skeleton only shows for an un-cached session fetch. Cached switches
   // return data synchronously — no flash. `enabled: false` (new chat)
   // keeps isLoading false so the starter prompts aren't hidden.
@@ -244,6 +278,7 @@ export function ChatWindow() {
       // ChatMessageList mounts directly (no Skeleton frame). Skip the write
       // when an entry already exists — a concurrent handleSend may have
       // seeded an optimistic message we must not clobber.
+      seedChatMessagesPageCache(qc, sessionId, []);
       qc.setQueryData<ChatMessage[]>(
         chatKeys.messages(sessionId),
         (old) => old ?? [],
@@ -303,6 +338,7 @@ export function ChatWindow() {
       // "new-chat first-message" white flash. Priming the cache first means
       // the very first read after activeSessionId flips hits data
       // synchronously and ChatMessageList mounts directly.
+      seedChatMessagesPageCache(qc, sessionId, [optimistic]);
       qc.setQueryData<ChatMessage[]>(
         chatKeys.messages(sessionId),
         (old) => (old ? [...old, optimistic] : [optimistic]),
@@ -337,6 +373,7 @@ export function ChatWindow() {
         created_at: result.created_at,
       });
       qc.invalidateQueries({ queryKey: chatKeys.messages(sessionId) });
+      qc.invalidateQueries({ queryKey: chatKeys.messagesPage(sessionId) });
     },
     [
       activeSessionId,
@@ -362,6 +399,7 @@ export function ChatWindow() {
     apiLogger.info("cancelTask.start", { taskId: pendingTaskId, sessionId: activeSessionId });
     qc.setQueryData(chatKeys.pendingTask(activeSessionId), {});
     qc.invalidateQueries({ queryKey: chatKeys.messages(activeSessionId) });
+    qc.invalidateQueries({ queryKey: chatKeys.messagesPage(activeSessionId) });
     // Fire-and-forget — UI is already in its post-cancel state. We log the
     // outcome but never block on it.
     api.cancelTaskById(pendingTaskId).then(
@@ -531,9 +569,14 @@ export function ChatWindow() {
         <ChatMessageSkeleton />
       ) : hasMessages ? (
         <ChatMessageList
+          key={activeSessionId}
           messages={messages}
           pendingTask={pendingTask}
           availability={availability}
+          firstItemIndex={firstItemIndex}
+          hasOlderMessages={!!hasOlderMessages}
+          isFetchingOlderMessages={isFetchingOlderMessages}
+          onLoadOlderMessages={() => void fetchOlderMessages()}
         />
       ) : (
         <EmptyState
@@ -854,6 +897,7 @@ function SessionDropdown({
     });
     queryClient.setQueryData(chatKeys.pendingTask(session.id), {});
     queryClient.invalidateQueries({ queryKey: chatKeys.messages(session.id) });
+    queryClient.invalidateQueries({ queryKey: chatKeys.messagesPage(session.id) });
 
     api.cancelTaskById(task.task_id).then(
       () => apiLogger.info("cancelTask.success (history row)", { taskId: task.task_id, sessionId: session.id }),
