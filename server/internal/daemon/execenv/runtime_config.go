@@ -583,11 +583,11 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 		b.WriteString("**This task was triggered by a NEW comment.** Your primary job is to respond to THIS specific comment, even if you have handled similar requests before in this session.\n\n")
 		fmt.Fprintf(&b, "1. Run `multica issue get %s --output json` to understand the issue context\n", ctx.IssueID)
 		fmt.Fprintf(&b, "2. Run `multica issue metadata list %s --output json` to see what prior agents pinned — best-effort, empty `{}` and CLI failures are normal. See the `## Issue Metadata` section above for what to look for.\n", ctx.IssueID)
-		if hint := BuildNewCommentsHint(ctx.IssueID, ctx.TriggerCommentID, ctx.NewCommentsSince, ctx.NewCommentCount); hint != "" {
+		if hint := BuildNewCommentsHint(ctx.IssueID, ctx.TriggerCommentID, ctx.TriggerThreadID, ctx.NewCommentsSince, ctx.NewCommentCount); hint != "" {
 			b.WriteString("3. " + hint)
 		} else if ctx.PriorSessionResumed {
-			b.WriteString("3. " + BuildResumedCommentsHint(ctx.IssueID, ctx.TriggerCommentID))
-		} else if cold := BuildColdCommentsHint(ctx.IssueID, ctx.TriggerCommentID); cold != "" {
+			b.WriteString("3. " + BuildResumedCommentsHint(ctx.IssueID, ctx.TriggerCommentID, ctx.TriggerThreadID))
+		} else if cold := BuildColdCommentsHint(ctx.IssueID, ctx.TriggerCommentID, ctx.TriggerThreadID); cold != "" {
 			b.WriteString("3. " + cold)
 		} else {
 			fmt.Fprintf(&b, "3. Catch up on comments — read with `multica issue comment list %s --output json` (long issue? `--recent 20`).\n", ctx.IssueID)
@@ -658,7 +658,16 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 			b.WriteString("Detailed skill instructions are in `.agent_context/skills/`. Each subdirectory contains a `SKILL.md`.\n\n")
 		}
 		for _, skill := range ctx.AgentSkills {
-			fmt.Fprintf(&b, "- **%s**\n", skill.Name)
+			// Emit the skill's one-line description alongside its name so the
+			// brief carries a "when to load" trigger signal. Claude-family
+			// providers get this natively from frontmatter discovery; providers
+			// without native discovery (hermes/default) only ever see this
+			// list, so a bare name gives them no signal for on-demand loading.
+			if desc := strings.TrimSpace(skill.Description); desc != "" {
+				fmt.Fprintf(&b, "- **%s** — %s\n", skill.Name, desc)
+			} else {
+				fmt.Fprintf(&b, "- **%s**\n", skill.Name)
+			}
 		}
 		b.WriteString("\n")
 	}

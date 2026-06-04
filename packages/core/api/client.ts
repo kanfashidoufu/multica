@@ -100,6 +100,10 @@ import type {
   GitHubPullRequest,
   ListGitHubInstallationsResponse,
   GitHubConnectResponse,
+  ListLarkInstallationsResponse,
+  BeginLarkInstallResponse,
+  LarkInstallStatusResponse,
+  RedeemLarkBindingTokenResponse,
   Squad,
   SquadMember,
   SquadMemberStatusListResponse,
@@ -2058,5 +2062,34 @@ export class ApiClient {
 
   async listIssuePullRequests(issueId: string): Promise<{ pull_requests: GitHubPullRequest[] }> {
     return this.fetch(`/api/issues/${issueId}/pull-requests`);
+  }
+
+  // Lark integration
+  async listLarkInstallations(workspaceId: string): Promise<ListLarkInstallationsResponse> {
+    return this.fetch(`/api/workspaces/${workspaceId}/lark/installations`);
+  }
+
+  async beginLarkInstall(workspaceId: string, agentId: string): Promise<BeginLarkInstallResponse> {
+    const search = new URLSearchParams({ agent_id: agentId });
+    return this.fetch(`/api/workspaces/${workspaceId}/lark/install/begin?${search.toString()}`, {
+      method: "POST",
+    });
+  }
+
+  async getLarkInstallStatus(workspaceId: string, sessionId: string): Promise<LarkInstallStatusResponse> {
+    return this.fetch(`/api/workspaces/${workspaceId}/lark/install/${sessionId}/status`);
+  }
+
+  async deleteLarkInstallation(workspaceId: string, installationId: string): Promise<void> {
+    await this.fetch(`/api/workspaces/${workspaceId}/lark/installations/${installationId}`, {
+      method: "DELETE",
+    });
+  }
+
+  async redeemLarkBindingToken(token: string): Promise<RedeemLarkBindingTokenResponse> {
+    return this.fetch(`/api/lark/binding/redeem`, {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
   }
 }

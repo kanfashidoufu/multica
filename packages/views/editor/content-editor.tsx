@@ -43,6 +43,7 @@ import type { UploadResult } from "@multica/core/hooks/use-file-upload";
 import { useWorkspaceSlug } from "@multica/core/paths";
 import { useQueryClient } from "@tanstack/react-query";
 import type { Attachment } from "@multica/core/types";
+import type { MentionItem } from "./extensions/mention-suggestion";
 import { createEditorExtensions } from "./extensions";
 import { uploadAndInsertFile } from "./extensions/file-upload";
 import { preprocessMarkdown } from "./utils/preprocess";
@@ -96,6 +97,9 @@ interface ContentEditorProps {
    * prompts) but *preserving* an existing one still matters.
    */
   disableMentions?: boolean;
+  /** Chat can surface current/recent issue/project suggestions. Other editors use default mention behavior. */
+  mentionMode?: "default" | "context";
+  mentionContextItems?: MentionItem[];
   /** Enable the chat-only `/` skill picker. Defaults false. */
   enableSlashCommands?: boolean;
   /**
@@ -141,6 +145,8 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
       submitOnEnter = false,
       currentIssueId,
       disableMentions = false,
+      mentionMode = "default",
+      mentionContextItems,
       enableSlashCommands = false,
       attachments,
     },
@@ -151,6 +157,7 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
     const onSubmitRef = useRef(onSubmit);
     const onBlurRef = useRef(onBlur);
     const onUploadFileRef = useRef(onUploadFile);
+    const mentionContextItemsRef = useRef<MentionItem[]>(mentionContextItems ?? []);
     const lastEmittedRef = useRef<string | null>(null);
 
     // Current workspace slug kept in a ref so the click handler always sees the
@@ -165,6 +172,7 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
     onSubmitRef.current = onSubmit;
     onBlurRef.current = onBlur;
     onUploadFileRef.current = onUploadFile;
+    mentionContextItemsRef.current = mentionContextItems ?? [];
 
     const queryClient = useQueryClient();
 
@@ -185,6 +193,8 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
         onUploadFileRef,
         submitOnEnter,
         disableMentions,
+        mentionMode,
+        getMentionContextItems: () => mentionContextItemsRef.current,
         enableSlashCommands,
       }),
       onUpdate: ({ editor: ed }) => {

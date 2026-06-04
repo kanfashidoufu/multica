@@ -94,6 +94,13 @@ export type {
   GitHubConnectResponse,
 } from "./github";
 export type {
+  LarkInstallation,
+  ListLarkInstallationsResponse,
+  BeginLarkInstallResponse,
+  LarkInstallStatusResponse,
+  RedeemLarkBindingTokenResponse,
+} from "./lark";
+export type {
   Autopilot,
   AutopilotStatus,
   AutopilotExecutionMode,

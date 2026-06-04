@@ -293,6 +293,33 @@ export function createEnDict(allowSignup: boolean): LandingDict {
     },
     entries: [
       {
+        version: "0.3.16",
+        date: "2026-06-04",
+        title: "Lark Bot Integration",
+        changes: [],
+        features: [
+          "Multica now supports Lark as a third-party integration, so teams can scan a QR code and create a Multica agent as a Lark Bot",
+          "Chat now has a searchable agent picker and an explicit context picker, making it easier to choose who should respond and what they should see",
+          "Descriptions and comments now support checkbox task lists for lightweight planning inside an Issue",
+          "Agents now include built-in Multica skills so they can follow workspace workflows more consistently",
+        ],
+        improvements: [
+          "Chat context is represented with clear mentions, making handoffs and later review easier to understand",
+          "Self-hosted email setup is clearer for teams using custom mail delivery",
+          "Usage analytics focus more tightly on product signals and avoid sending operational background activity",
+        ],
+        fixes: [
+          "Attachments download reliably from private storage without opening a blank browser tab",
+          "Every user message reaches the agent even when several chat messages are sent quickly",
+          "Desktop now explains when login has expired instead of staying stuck while starting",
+          "Pinned sidebar items no longer linger after switching workspaces",
+          "Reused runtimes refresh Skills cleanly instead of accumulating duplicate Skill folders",
+          "OpenCode model choices remain available even when setup checks return partial results",
+          "Comment-triggered agent runs stay attached to the right conversation thread",
+          "The CLI now treats missing Issue metadata as an empty result instead of an error",
+        ],
+      },
+      {
         version: "0.3.15",
         date: "2026-06-03",
         title: "Text Highlights + More Stable Agent Runs",

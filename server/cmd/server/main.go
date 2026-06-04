@@ -321,7 +321,7 @@ func main() {
 	// shutdown so any pending bumps are flushed before we exit.
 	heartbeatScheduler := handler.NewBatchedHeartbeatScheduler(queries, handler.DefaultHeartbeatBatchInterval)
 
-	r := NewRouterWithOptions(pool, hub, bus, analyticsClient, storeRedis, RouterOptions{
+	r, h := NewRouterWithOptions(pool, hub, bus, analyticsClient, storeRedis, RouterOptions{
 		HTTPMetrics:        httpMetrics,
 		BusinessMetrics:    businessMetrics,
 		DaemonHub:          daemonHub,
@@ -361,6 +361,16 @@ func main() {
 	go notificationDispatcher.RunWorker(sweepCtx)
 	go invitationNotifier.RunWorker(sweepCtx)
 	go runDBStatsLogger(sweepCtx, pool)
+
+	// Lark inbound supervisor: holds the §4.4 WS lease per installation
+	// and runs the EventConnector for each. Nil when the Lark master
+	// key is unset — self-host deployments that have not opted in to
+	// Lark do not pay any goroutine cost. Lifecycle is bound to
+	// sweepCtx so the Hub winds down alongside the other long-running
+	// workers, AFTER the HTTP server has drained.
+	if h.LarkHub != nil {
+		go h.LarkHub.Run(sweepCtx)
+	}
 
 	if metricsServer != nil {
 		go func() {
@@ -402,6 +412,22 @@ func main() {
 	// final batch of queued heartbeat bumps.
 	sweepCancel()
 	heartbeatScheduler.Stop()
+
+	// Join the Lark Hub's per-installation supervisor goroutines so the
+	// lease renewer can issue a final release before process exit;
+	// otherwise the next replica would have to wait the full LeaseTTL
+	// before picking up the installation on the other side of the
+	// redeploy. The wait is bounded — if a supervisor is wedged (DB
+	// pool stalled, a future real EventConnector ignoring ctx, etc.)
+	// the fallback is the natural LeaseTTL expiry on the other side,
+	// which is strictly better than holding shutdown open forever.
+	if h.LarkHub != nil {
+		if !h.LarkHub.WaitWithTimeout(h.LarkHub.ShutdownTimeout()) {
+			slog.Warn("lark hub: supervisors did not exit within shutdown timeout; proceeding",
+				"timeout", h.LarkHub.ShutdownTimeout().String(),
+			)
+		}
+	}
 
 	if metricsServer != nil {
 		metricsShutdownCtx, metricsShutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
