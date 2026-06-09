@@ -2642,6 +2642,10 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		IsSquadLeader:                    strings.Contains(instructions, "## Squad Operating Protocol"),
 		RequestingUserName:               task.RequestingUserName,
 		RequestingUserProfileDescription: task.RequestingUserProfileDescription,
+		InitiatorType:                    task.InitiatorType,
+		InitiatorID:                      task.InitiatorID,
+		InitiatorName:                    task.InitiatorName,
+		InitiatorEmail:                   task.InitiatorEmail,
 		WorkspaceContext:                 task.WorkspaceContext,
 	}
 

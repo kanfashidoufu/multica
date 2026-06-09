@@ -9,6 +9,7 @@ import {
 } from "@multica/ui/components/ui/popover";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useActorName } from "@multica/core/workspace/hooks";
+import { cn } from "@multica/ui/lib/utils";
 import { agentTaskSnapshotOptions } from "@multica/core/agents";
 import type { AgentTask } from "@multica/core/types";
 import { AgentAvatarStack } from "../../agents/components/agent-avatar-stack";
@@ -26,9 +27,10 @@ import { useT } from "../../i18n";
 // with those surfaces and costs zero extra network.
 //
 // Collapsed display stays intentionally shallow:
-//   - one active agent   → avatar + "{name} is working"
-//   - multiple agents   → avatar stack + "N agents working"
-//   - queued only       → same copy, half-opacity avatars / muted text
+//   - one running agent  → avatar + "{name} is working"
+//   - multiple running   → avatar stack + "N agents working"
+//   - queued only        → "{name} is queued" / "N agents queued",
+//                          half-opacity avatars / muted text (no beam)
 //
 // Click opens a compact Popover card with the same active rows as the right
 // panel. Those rows show necessary status/time and task entry actions, but do
@@ -83,13 +85,23 @@ function ActiveChip({ issueId, running, queued }: ActiveChipProps) {
   const agentIds = [...new Set(activeTasks.map((task) => task.agent_id))];
   const anyRunning = running.length > 0;
   const isSingle = agentIds.length === 1;
+  // Copy must follow the actual state: "is working" only when something is
+  // truly running. With nothing running (queued / dispatched / parked on a
+  // path lock) the chip reads "is queued" so a not-yet-started agent isn't
+  // mislabelled as working.
   const label = isSingle
-    ? t(($) => $.agent_live.is_working, {
-        name: getActorName("agent", agentIds[0] ?? ""),
-      })
-    : t(($) => $.agent_activity.hover_header, {
-        count: agentIds.length,
-      });
+    ? t(
+        ($) =>
+          anyRunning ? $.agent_live.is_working : $.agent_live.is_queued,
+        { name: getActorName("agent", agentIds[0] ?? "") },
+      )
+    : t(
+        ($) =>
+          anyRunning
+            ? $.agent_activity.hover_header
+            : $.agent_activity.hover_header_queued,
+        { count: agentIds.length },
+      );
 
   return (
     <div className="flex items-center gap-1">
@@ -99,7 +111,15 @@ function ActiveChip({ issueId, running, queued }: ActiveChipProps) {
             <button
               type="button"
               aria-label={label}
-              className="flex h-7 max-w-[11rem] items-center gap-1.5 rounded-md px-1.5 text-muted-foreground outline-none transition-colors hover:bg-accent/60 focus-visible:ring-2 focus-visible:ring-ring"
+              // While an agent is actively running, the chip wears the
+              // brand border beam — a highlight sweeping around its rounded
+              // edge — so a triggered run is unmistakably "alive" in the
+              // header. Queued-only state stays calm (no beam) to reserve the
+              // motion for work that is genuinely in flight.
+              className={cn(
+                "flex h-7 max-w-[11rem] items-center gap-1.5 rounded-md px-1.5 text-muted-foreground outline-none transition-colors hover:bg-accent/60 focus-visible:ring-2 focus-visible:ring-ring",
+                anyRunning && "border-beam bg-brand/5",
+              )}
             />
           }
         >
@@ -117,9 +137,13 @@ function ActiveChip({ issueId, running, queued }: ActiveChipProps) {
         </PopoverTrigger>
         <PopoverContent align="end" keepMounted className="w-80">
           <div className="text-xs font-medium text-muted-foreground">
-            {t(($) => $.agent_activity.hover_header, {
-              count: agentIds.length,
-            })}
+            {t(
+              ($) =>
+                anyRunning
+                  ? $.agent_activity.hover_header
+                  : $.agent_activity.hover_header_queued,
+              { count: agentIds.length },
+            )}
           </div>
           <div className="flex flex-col gap-0.5">
             {activeTasks.map((task) => (
