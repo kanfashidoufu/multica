@@ -127,6 +127,52 @@ func (m *mockStorage) put(key string, data []byte) {
 	m.files[key] = append([]byte(nil), data...)
 }
 
+type mockOSSStorage struct {
+	mockStorage
+}
+
+func (m *mockOSSStorage) KeyFromURL(rawURL string) string {
+	const prefix = "https://multica-test.oss-cn-hangzhou.aliyuncs.com/"
+	if strings.HasPrefix(rawURL, prefix) {
+		return strings.TrimPrefix(rawURL, prefix)
+	}
+	return m.mockStorage.KeyFromURL(rawURL)
+}
+
+func (m *mockOSSStorage) PresignGet(_ context.Context, key string, _ time.Duration) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.presignCalls = append(m.presignCalls, key)
+	u := url.URL{
+		Scheme: "https",
+		Host:   "multica-test.oss-cn-hangzhou.aliyuncs.com",
+		Path:   "/" + key,
+	}
+	q := u.Query()
+	q.Set("X-Amz-Signature", "mock-oss")
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+func (m *mockOSSStorage) PresignGetWithContentDisposition(_ context.Context, key string, _ time.Duration, contentDisposition string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.presignCalls = append(m.presignCalls, key)
+	m.presignDispositions = append(m.presignDispositions, contentDisposition)
+	u := url.URL{
+		Scheme: "https",
+		Host:   "multica-test.oss-cn-hangzhou.aliyuncs.com",
+		Path:   "/" + key,
+	}
+	q := u.Query()
+	q.Set("X-Amz-Signature", "mock-oss")
+	if contentDisposition != "" {
+		q.Set("response-content-disposition", contentDisposition)
+	}
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
 func TestUploadFileForeignWorkspace(t *testing.T) {
 	origStorage := testHandler.Storage
 	testHandler.Storage = &mockStorage{}
@@ -463,10 +509,18 @@ func testCloudFrontSigner(t *testing.T) *auth.CloudFrontSigner {
 	return signer
 }
 
-func TestAttachmentToResponse_NonCloudFrontUsesDownloadEndpoint(t *testing.T) {
+func TestAttachmentToResponse_InternalURLUsesDownloadEndpoint(t *testing.T) {
+	origStorage := testHandler.Storage
+	origCfg := testHandler.cfg
 	origSigner := testHandler.CFSigner
+	testHandler.Storage = &mockStorage{}
+	testHandler.cfg.AttachmentDownloadMode = "auto"
 	testHandler.CFSigner = nil
-	t.Cleanup(func() { testHandler.CFSigner = origSigner })
+	t.Cleanup(func() {
+		testHandler.Storage = origStorage
+		testHandler.cfg = origCfg
+		testHandler.CFSigner = origSigner
+	})
 
 	id := seedAttachmentURL(t, "http://rustfs:9000/test-bucket/private.txt", "private.txt", "text/plain", 5)
 	att, err := testHandler.Queries.GetAttachment(context.Background(), db.GetAttachmentParams{
@@ -477,12 +531,64 @@ func TestAttachmentToResponse_NonCloudFrontUsesDownloadEndpoint(t *testing.T) {
 		t.Fatalf("GetAttachment: %v", err)
 	}
 
-	resp := testHandler.attachmentToResponse(att)
+	resp := testHandler.attachmentToResponse(context.Background(), att)
 	if resp.URL != "http://rustfs:9000/test-bucket/private.txt" {
 		t.Fatalf("stored url changed: %q", resp.URL)
 	}
 	if resp.DownloadURL != "/api/attachments/"+id+"/download" {
 		t.Fatalf("download_url = %q, want unified endpoint", resp.DownloadURL)
+	}
+}
+
+func TestAttachmentToResponse_PublicOSSURLUsesPresignedURL(t *testing.T) {
+	store := &mockOSSStorage{}
+	origStorage := testHandler.Storage
+	origCfg := testHandler.cfg
+	origSigner := testHandler.CFSigner
+	testHandler.Storage = store
+	testHandler.cfg.AttachmentDownloadMode = "auto"
+	testHandler.CFSigner = nil
+	t.Cleanup(func() {
+		testHandler.Storage = origStorage
+		testHandler.cfg = origCfg
+		testHandler.CFSigner = origSigner
+	})
+
+	key := "workspaces/ws-1/preview.png"
+	id := seedAttachmentURL(t, "https://multica-test.oss-cn-hangzhou.aliyuncs.com/"+key, "preview.png", "image/png", 10)
+	att, err := testHandler.Queries.GetAttachment(context.Background(), db.GetAttachmentParams{
+		ID:          parseUUID(id),
+		WorkspaceID: parseUUID(testWorkspaceID),
+	})
+	if err != nil {
+		t.Fatalf("GetAttachment: %v", err)
+	}
+
+	resp := testHandler.attachmentToResponse(context.Background(), att)
+	if resp.URL != "https://multica-test.oss-cn-hangzhou.aliyuncs.com/"+key {
+		t.Fatalf("stored url changed: %q", resp.URL)
+	}
+	if resp.DownloadURL == "/api/attachments/"+id+"/download" {
+		t.Fatalf("download_url should be presigned OSS URL, got unified endpoint")
+	}
+	parsed, err := url.Parse(resp.DownloadURL)
+	if err != nil {
+		t.Fatalf("parse download_url: %v", err)
+	}
+	if got := parsed.Host; got != "multica-test.oss-cn-hangzhou.aliyuncs.com" {
+		t.Fatalf("download_url host = %q", got)
+	}
+	if got := parsed.Path; got != "/"+key {
+		t.Fatalf("download_url path = %q", got)
+	}
+	if sig := parsed.Query().Get("X-Amz-Signature"); sig != "mock-oss" {
+		t.Fatalf("X-Amz-Signature = %q, want mock-oss", sig)
+	}
+	if got := parsed.Query().Get("response-content-disposition"); got != "" {
+		t.Fatalf("response download_url should not force disposition, got %q", got)
+	}
+	if len(store.presignCalls) != 1 || store.presignCalls[0] != key {
+		t.Fatalf("presign calls = %v, want [%s]", store.presignCalls, key)
 	}
 }
 
@@ -657,6 +763,48 @@ func TestDownloadAttachment_AutoPublicEndpointPresigns(t *testing.T) {
 		t.Fatalf("presign calls = %v, want [%s]", store.presignCalls, key)
 	}
 	if len(store.presignDispositions) != 1 || store.presignDispositions[0] != `attachment; filename="public.txt"` {
+		t.Fatalf("presign dispositions = %v", store.presignDispositions)
+	}
+}
+
+func TestDownloadAttachment_AutoPublicOSSURLPresigns(t *testing.T) {
+	store := &mockOSSStorage{}
+	origStorage := testHandler.Storage
+	origCfg := testHandler.cfg
+	origSigner := testHandler.CFSigner
+	testHandler.Storage = store
+	testHandler.cfg.AttachmentDownloadMode = "auto"
+	testHandler.CFSigner = nil
+	t.Cleanup(func() {
+		testHandler.Storage = origStorage
+		testHandler.cfg = origCfg
+		testHandler.CFSigner = origSigner
+	})
+
+	key := "workspaces/ws-1/public-oss.png"
+	id := seedAttachmentURL(t, "https://multica-test.oss-cn-hangzhou.aliyuncs.com/"+key, "public oss.png", "image/png", 10)
+
+	req, w := newDownloadRequest(t, id, testWorkspaceID)
+	testHandler.DownloadAttachment(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302; body=%s", w.Code, w.Body.String())
+	}
+	loc := w.Header().Get("Location")
+	if !strings.Contains(loc, "X-Amz-Signature=mock-oss") {
+		t.Fatalf("Location = %q, want fake OSS signature", loc)
+	}
+	parsed, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if got := parsed.Query().Get("response-content-disposition"); got != `attachment; filename="public oss.png"` {
+		t.Fatalf("response-content-disposition = %q", got)
+	}
+	if len(store.presignCalls) != 1 || store.presignCalls[0] != key {
+		t.Fatalf("presign calls = %v, want [%s]", store.presignCalls, key)
+	}
+	if len(store.presignDispositions) != 1 || store.presignDispositions[0] != `attachment; filename="public oss.png"` {
 		t.Fatalf("presign dispositions = %v", store.presignDispositions)
 	}
 }

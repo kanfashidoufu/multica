@@ -1519,7 +1519,7 @@ func (h *Handler) GetIssue(w http.ResponseWriter, r *http.Request) {
 	if err == nil && len(attachments) > 0 {
 		resp.Attachments = make([]AttachmentResponse, len(attachments))
 		for i, a := range attachments {
-			resp.Attachments[i] = h.attachmentToResponse(a)
+			resp.Attachments[i] = h.attachmentToResponse(r.Context(), a)
 		}
 	}
 
@@ -2115,7 +2115,7 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		}
 		out := make([]AttachmentResponse, len(atts))
 		for i, a := range atts {
-			out[i] = h.attachmentToResponse(a)
+			out[i] = h.attachmentToResponse(r.Context(), a)
 		}
 		return out
 	}

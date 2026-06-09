@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -159,6 +160,33 @@ func (s *OSSStorage) GetReader(ctx context.Context, key string) (io.ReadCloser, 
 		return nil, fmt.Errorf("oss GetObject: %w", err)
 	}
 	return out.Body, nil
+}
+
+func (s *OSSStorage) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error) {
+	return s.PresignGetWithContentDisposition(ctx, key, ttl, "")
+}
+
+func (s *OSSStorage) PresignGetWithContentDisposition(ctx context.Context, key string, ttl time.Duration, contentDisposition string) (string, error) {
+	if key == "" {
+		return "", fmt.Errorf("oss PresignGet: empty key")
+	}
+	if ttl <= 0 {
+		ttl = 30 * time.Minute
+	}
+	input := &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	}
+	if contentDisposition != "" {
+		input.ResponseContentDisposition = aws.String(contentDisposition)
+	}
+	out, err := s3.NewPresignClient(s.client).PresignGetObject(ctx, input, func(opts *s3.PresignOptions) {
+		opts.Expires = ttl
+	})
+	if err != nil {
+		return "", fmt.Errorf("oss PresignGetObject: %w", err)
+	}
+	return out.URL, nil
 }
 
 func (s *OSSStorage) Upload(ctx context.Context, key string, data []byte, contentType string, filename string) (string, error) {

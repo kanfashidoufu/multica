@@ -70,7 +70,7 @@ type AttachmentResponse struct {
 	CreatedAt     string  `json:"created_at"`
 }
 
-func (h *Handler) attachmentToResponse(a db.Attachment) AttachmentResponse {
+func (h *Handler) attachmentToResponse(ctx context.Context, a db.Attachment) AttachmentResponse {
 	id := uuidToString(a.ID)
 	resp := AttachmentResponse{
 		ID:           id,
@@ -84,8 +84,8 @@ func (h *Handler) attachmentToResponse(a db.Attachment) AttachmentResponse {
 		SizeBytes:    a.SizeBytes,
 		CreatedAt:    a.CreatedAt.Time.Format("2006-01-02T15:04:05Z07:00"),
 	}
-	if h.CFSigner != nil {
-		resp.DownloadURL = h.CFSigner.SignedURL(a.Url, time.Now().Add(h.attachmentDownloadURLTTL()))
+	if downloadURL := h.attachmentResponseDownloadURL(ctx, id, a.Url); downloadURL != "" {
+		resp.DownloadURL = downloadURL
 	}
 	if a.IssueID.Valid {
 		s := uuidToString(a.IssueID)
@@ -108,6 +108,36 @@ func (h *Handler) attachmentToResponse(a db.Attachment) AttachmentResponse {
 
 func attachmentDownloadPath(id string) string {
 	return "/api/attachments/" + id + "/download"
+}
+
+func (h *Handler) attachmentResponseDownloadURL(ctx context.Context, id, rawURL string) string {
+	endpoint := attachmentDownloadPath(id)
+	switch h.resolveAttachmentDownloadMode(rawURL) {
+	case attachmentDownloadModeCloudFront:
+		if h.CFSigner == nil {
+			return endpoint
+		}
+		return h.CFSigner.SignedURL(rawURL, time.Now().Add(h.attachmentDownloadURLTTL()))
+	case attachmentDownloadModePresign:
+		if h.Storage == nil {
+			return endpoint
+		}
+		presigner, ok := h.Storage.(storage.Presigner)
+		if !ok {
+			return endpoint
+		}
+		key := h.Storage.KeyFromURL(rawURL)
+		signedURL, err := presigner.PresignGet(ctx, key, h.attachmentDownloadURLTTL())
+		if err != nil {
+			slog.Error("failed to presign attachment response URL", "id", id, "key", key, "error", err)
+			return endpoint
+		}
+		return signedURL
+	case attachmentDownloadModeProxy:
+		return endpoint
+	default:
+		return endpoint
+	}
 }
 
 func normalizeAttachmentDownloadMode(raw string) (attachmentDownloadMode, bool) {
@@ -154,7 +184,7 @@ func (h *Handler) groupAttachments(r *http.Request, commentIDs []pgtype.UUID) ma
 	grouped := make(map[string][]AttachmentResponse, len(commentIDs))
 	for _, a := range attachments {
 		cid := uuidToString(a.CommentID)
-		grouped[cid] = append(grouped[cid], h.attachmentToResponse(a))
+		grouped[cid] = append(grouped[cid], h.attachmentToResponse(r.Context(), a))
 	}
 	return grouped
 }
@@ -178,7 +208,7 @@ func (h *Handler) groupChatMessageAttachments(ctx context.Context, workspaceID s
 	grouped := make(map[string][]AttachmentResponse, len(messageIDs))
 	for _, a := range attachments {
 		mid := uuidToString(a.ChatMessageID)
-		grouped[mid] = append(grouped[mid], h.attachmentToResponse(a))
+		grouped[mid] = append(grouped[mid], h.attachmentToResponse(ctx, a))
 	}
 	return grouped
 }
@@ -325,7 +355,7 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 			// S3 upload succeeded but DB record failed — still return the link
 			// so the file is usable. Log the error for investigation.
 		} else {
-			writeJSON(w, http.StatusOK, h.attachmentToResponse(att))
+			writeJSON(w, http.StatusOK, h.attachmentToResponse(r.Context(), att))
 			return
 		}
 
@@ -374,7 +404,7 @@ func (h *Handler) ListAttachments(w http.ResponseWriter, r *http.Request) {
 
 	resp := make([]AttachmentResponse, len(attachments))
 	for i, a := range attachments {
-		resp[i] = h.attachmentToResponse(a)
+		resp[i] = h.attachmentToResponse(r.Context(), a)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -389,7 +419,7 @@ func (h *Handler) GetAttachmentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, h.attachmentToResponse(att))
+	writeJSON(w, http.StatusOK, h.attachmentToResponse(r.Context(), att))
 }
 
 func (h *Handler) loadAttachmentForRequest(w http.ResponseWriter, r *http.Request) (db.Attachment, bool) {

@@ -2,8 +2,14 @@ package storage
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 func TestOSSStorageKeyFromURL(t *testing.T) {
@@ -68,6 +74,62 @@ func TestOSSStorageCdnDomain(t *testing.T) {
 	store.publicBaseURL = ""
 	if got := store.CdnDomain(); got != "multica-test.oss-cn-hangzhou.aliyuncs.com" {
 		t.Fatalf("CdnDomain without public base = %q, want multica-test.oss-cn-hangzhou.aliyuncs.com", got)
+	}
+}
+
+func TestOSSStoragePresignGet(t *testing.T) {
+	store := &OSSStorage{
+		client: s3.New(s3.Options{
+			Region:       "cn-hangzhou",
+			BaseEndpoint: aws.String("https://oss-cn-hangzhou.aliyuncs.com"),
+			Credentials:  aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider("AKID", "SECRET", "")),
+		}),
+		bucket: "multica-test",
+	}
+
+	got, err := store.PresignGet(context.Background(), "workspaces/ws-1/file.png", 5*time.Minute)
+	if err != nil {
+		t.Fatalf("PresignGet: %v", err)
+	}
+	for _, want := range []string{
+		"https://multica-test.oss-cn-hangzhou.aliyuncs.com/workspaces/ws-1/file.png",
+		"X-Amz-Signature=",
+		"X-Amz-Expires=300",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("presigned URL %q does not contain %q", got, want)
+		}
+	}
+}
+
+func TestOSSStoragePresignGetWithContentDisposition(t *testing.T) {
+	store := &OSSStorage{
+		client: s3.New(s3.Options{
+			Region:       "cn-hangzhou",
+			BaseEndpoint: aws.String("https://oss-cn-hangzhou.aliyuncs.com"),
+			Credentials:  aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider("AKID", "SECRET", "")),
+		}),
+		bucket: "multica-test",
+	}
+
+	got, err := store.PresignGetWithContentDisposition(
+		context.Background(),
+		"workspaces/ws-1/file.png",
+		5*time.Minute,
+		`attachment; filename="report.png"`,
+	)
+	if err != nil {
+		t.Fatalf("PresignGetWithContentDisposition: %v", err)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse presigned URL: %v", err)
+	}
+	if got := u.Query().Get("response-content-disposition"); got != `attachment; filename="report.png"` {
+		t.Fatalf("response-content-disposition = %q", got)
+	}
+	if sig := u.Query().Get("X-Amz-Signature"); sig == "" {
+		t.Fatalf("missing X-Amz-Signature in %q", got)
 	}
 }
 
