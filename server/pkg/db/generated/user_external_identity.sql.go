@@ -20,19 +20,22 @@ WHERE x.provider = $1
   AND (
     ($3::text <> '' AND x.union_id = $3::text)
     OR ($4::text <> '' AND x.open_id = $4::text)
+    OR ($5::text <> '' AND x.external_user_id = $5::text)
   )
 ORDER BY CASE
   WHEN $3::text <> '' AND x.union_id = $3::text THEN 0
-  ELSE 1
+  WHEN $5::text <> '' AND x.external_user_id = $5::text THEN 1
+  ELSE 2
 END
 LIMIT 1
 `
 
 type GetUserByExternalIdentityParams struct {
-	Provider  string `json:"provider"`
-	TenantKey string `json:"tenant_key"`
-	UnionID   string `json:"union_id"`
-	OpenID    string `json:"open_id"`
+	Provider       string `json:"provider"`
+	TenantKey      string `json:"tenant_key"`
+	UnionID        string `json:"union_id"`
+	OpenID         string `json:"open_id"`
+	ExternalUserID string `json:"external_user_id"`
 }
 
 func (q *Queries) GetUserByExternalIdentity(ctx context.Context, arg GetUserByExternalIdentityParams) (User, error) {
@@ -41,6 +44,7 @@ func (q *Queries) GetUserByExternalIdentity(ctx context.Context, arg GetUserByEx
 		arg.TenantKey,
 		arg.UnionID,
 		arg.OpenID,
+		arg.ExternalUserID,
 	)
 	var i User
 	err := row.Scan(
@@ -56,6 +60,52 @@ func (q *Queries) GetUserByExternalIdentity(ctx context.Context, arg GetUserByEx
 		&i.CloudWaitlistReason,
 		&i.StarterContentState,
 		&i.Language,
+	)
+	return i, err
+}
+
+const getWorkspaceMemberByExternalIdentity = `-- name: GetWorkspaceMemberByExternalIdentity :one
+SELECT m.id, m.workspace_id, m.user_id, m.role, m.created_at
+FROM user_external_identity x
+JOIN member m ON m.user_id = x.user_id
+WHERE m.workspace_id = $1
+  AND x.provider = $2
+  AND (
+    ($3::text <> '' AND x.external_user_id = $3::text)
+    OR ($4::text <> '' AND x.open_id = $4::text)
+    OR ($5::text <> '' AND x.union_id = $5::text)
+  )
+ORDER BY CASE
+  WHEN $3::text <> '' AND x.external_user_id = $3::text THEN 0
+  WHEN $4::text <> '' AND x.open_id = $4::text THEN 1
+  ELSE 2
+END
+LIMIT 1
+`
+
+type GetWorkspaceMemberByExternalIdentityParams struct {
+	WorkspaceID    pgtype.UUID `json:"workspace_id"`
+	Provider       string      `json:"provider"`
+	ExternalUserID string      `json:"external_user_id"`
+	OpenID         string      `json:"open_id"`
+	UnionID        string      `json:"union_id"`
+}
+
+func (q *Queries) GetWorkspaceMemberByExternalIdentity(ctx context.Context, arg GetWorkspaceMemberByExternalIdentityParams) (Member, error) {
+	row := q.db.QueryRow(ctx, getWorkspaceMemberByExternalIdentity,
+		arg.WorkspaceID,
+		arg.Provider,
+		arg.ExternalUserID,
+		arg.OpenID,
+		arg.UnionID,
+	)
+	var i Member
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.UserID,
+		&i.Role,
+		&i.CreatedAt,
 	)
 	return i, err
 }

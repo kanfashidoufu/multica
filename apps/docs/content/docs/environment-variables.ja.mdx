@@ -218,6 +218,28 @@ S3 の前段に CloudFront を置く場合、3 つの変数が適用されます
 
 **注:** `GITHUB_WEBHOOK_SECRET` はインストールフローの state token の署名キーとして再利用されるため、運用者は secret を 1 つだけ管理すればよいです。これは GitHub App の *Client* secret では**ありません** — Client secret は OAuth 関連であり、この連携では使われません。完全な手順は [GitHub 連携 → セルフホストのセットアップ](/github-integration#self-host-setup)を参照してください。
 
+## 外部 issue インポート
+
+Feishu Base automation などの外部 automation が `POST /api/webhooks/external-issues` で Multica issue を作成する場合に設定します。
+
+| 変数 | デフォルト | 説明 |
+|---|---|---|
+| `MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN` | 空 | 外部 issue import エンドポイントで必須の共有 secret。リクエストは `Authorization: Bearer <token>` を送信する必要があります。未設定の場合、エンドポイントは `503 external issue import is not configured` を返します |
+| `MULTICA_EXTERNAL_ISSUE_DEFAULT_WORKSPACE_ID` | 空 | automation payload が `workspace_id` を省略した場合に使うデフォルト workspace id。Feishu Base automation は通常 `app_token`、`table_id`、`record_id` だけを送るため、この flow では設定してください |
+| `MULTICA_EXTERNAL_ISSUE_DEFAULT_LARK_USER_ID` | 空 | デフォルトの Multica member assignee / creator として使う Feishu/Lark `user_id`。該当する Lark アカウントは、対象 workspace の Multica ユーザーに既にリンクされている必要があります |
+
+Feishu Base automation の HTTP step Params は次のように設定できます。
+
+| Param | 値 |
+|---|---|
+| `app_token` | Feishu automation の Base app token |
+| `table_id` | Feishu automation の table id |
+| `record_id` | Feishu automation の record id |
+
+Multica は Lark login app の `LARK_APP_ID` と `LARK_APP_SECRET` を使って該当 Base record を取得し、`版本类型` が `小需求` の record だけを import します。添付は Feishu Base attachment field の `file_token`、`name`、`size`、`type`、`url`、`tmp_url` から読み取り、issue attachment としてアップロードします。
+
+インポートされた issue は `backlog` に作成され、`origin_type=external_issue` で冪等化されます。同じ外部 record の retry は重複作成せず、既存 issue を返します。
+
 ## 使用量分析
 
 デフォルトでは、サーバーは Multica の公式 PostHog インスタンスにレポートします。オプトアウトするには `ANALYTICS_DISABLED=true` を設定してください。

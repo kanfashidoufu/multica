@@ -144,6 +144,20 @@ type cachedToken struct {
 // contract.
 func (c *httpAPIClient) IsConfigured() bool { return true }
 
+// TenantAccessToken exposes the same cached tenant token used by the IM
+// transport for narrow integrations that need to fetch Lark-owned assets.
+// It is intentionally not part of APIClient so most tests/fakes do not need
+// to grow a method they never call.
+func (c *httpAPIClient) TenantAccessToken(ctx context.Context, creds InstallationCredentials) (string, error) {
+	return c.tenantAccessToken(ctx, creds)
+}
+
+// OpenPlatformBaseURL returns the per-installation REST API host after
+// applying the optional deployment override.
+func (c *httpAPIClient) OpenPlatformBaseURL(creds InstallationCredentials) string {
+	return c.resolveBaseURL(creds)
+}
+
 // tenantAccessToken returns a usable tenant_access_token for the
 // given installation, reusing a cached token while it is alive (minus
 // safety margin) and otherwise fetching a fresh one from Lark.

@@ -240,6 +240,28 @@ API 返回的 `download_url` 在未配置 CloudFront 签名时会指向 `GET /ap
 
 **注意：** `GITHUB_WEBHOOK_SECRET` 同时被复用为 install 流程里 state token 的签名密钥，所以运维只需要维护一个 secret。它**不是** GitHub App 的 *Client* secret——Client secret 是 OAuth 用的，和本集成无关。完整配置流程见 [GitHub 集成 → Self-Host 配置](/github-integration#self-host-配置)。
 
+## 外部 issue 导入
+
+当飞书多维表格自动化等外部系统需要通过 `POST /api/webhooks/external-issues` 创建 Multica issue 时，配置下面这些变量。
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN` | 空 | 外部 issue 导入接口要求的共享密钥。请求必须带 `Authorization: Bearer <token>`。不设置时接口返回 `503 external issue import is not configured` |
+| `MULTICA_EXTERNAL_ISSUE_DEFAULT_WORKSPACE_ID` | 空 | 自动化请求未传 `workspace_id` 时使用的默认工作区 ID。飞书多维表格自动化通常只传 `app_token`、`table_id`、`record_id`，这种方式需要配置该变量 |
+| `MULTICA_EXTERNAL_ISSUE_DEFAULT_LARK_USER_ID` | 空 | 默认指派人和创建人使用的飞书/Lark `user_id`。对应的 Lark 账号必须已经绑定到 Multica 用户，且该用户属于目标工作区 |
+
+飞书多维表格自动化的 HTTP 节点可以把下面字段配置在 Params 中：
+
+| Param | 值 |
+|---|---|
+| `app_token` | 飞书自动化中的 Base app token |
+| `table_id` | 飞书自动化中的表 ID |
+| `record_id` | 飞书自动化中的记录 ID |
+
+Multica 会使用飞书登录应用的 `LARK_APP_ID` 和 `LARK_APP_SECRET` 回查这条多维表格记录，只导入 `版本类型` 为 `小需求` 的记录。附件会按飞书多维表格附件字段里的 `file_token`、`name`、`size`、`type`、`url`、`tmp_url` 解析后上传为 issue 附件。
+
+导入的 issue 默认进入 `backlog`（待规划），并使用 `origin_type=external_issue` 做幂等；同一外部记录重试时会返回已存在的 issue，不会重复创建。
+
 ## 用量统计
 
 默认上报到 Multica 官方 PostHog 实例。不想上报就把 `ANALYTICS_DISABLED=true`。

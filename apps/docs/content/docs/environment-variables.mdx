@@ -237,6 +237,28 @@ The [GitHub PR ↔ issue integration](/github-integration) needs two variables. 
 
 **Note:** `GITHUB_WEBHOOK_SECRET` is reused as the signing key for the install-flow state token, so operators only need to manage one secret. It is **not** the GitHub App's *Client* secret — Client secrets are OAuth-related and not used by this integration. See [GitHub integration → Self-host setup](/github-integration#self-host-setup) for the full walkthrough.
 
+## External issue import
+
+Set these when an external automation, such as Feishu Base automation, should create Multica issues through `POST /api/webhooks/external-issues`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN` | empty | Shared secret required by the external issue import endpoint. Requests must send `Authorization: Bearer <token>`. When unset, the endpoint returns `503 external issue import is not configured` |
+| `MULTICA_EXTERNAL_ISSUE_DEFAULT_WORKSPACE_ID` | empty | Default workspace id used when the automation payload omits `workspace_id`. Feishu Base automation usually sends only `app_token`, `table_id`, and `record_id`, so set this for that flow |
+| `MULTICA_EXTERNAL_ISSUE_DEFAULT_LARK_USER_ID` | empty | Feishu/Lark `user_id` used as the default Multica member assignee and creator. The matching Lark account must already be linked to a Multica user who belongs to the target workspace |
+
+For Feishu Base automation, configure the HTTP step Params as:
+
+| Param | Value |
+|---|---|
+| `app_token` | Base app token from Feishu automation |
+| `table_id` | Table id from Feishu automation |
+| `record_id` | Record id from Feishu automation |
+
+Multica uses `LARK_APP_ID` and `LARK_APP_SECRET` from the Lark login app to fetch that one Base record, then imports records whose `版本类型` is `小需求`. Attachments are read from Feishu Base attachment field values (`file_token`, `name`, `size`, `type`, `url`, `tmp_url`) and uploaded as issue attachments.
+
+Imported issues are created in `backlog` and use `origin_type=external_issue` for idempotency, so retries for the same external record return the existing issue instead of creating duplicates.
+
 ## Usage analytics
 
 By default, the server reports to Multica's official PostHog instance. To opt out, set `ANALYTICS_DISABLED=true`.

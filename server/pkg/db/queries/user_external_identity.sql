@@ -7,10 +7,30 @@ WHERE x.provider = $1
   AND (
     (sqlc.arg('union_id')::text <> '' AND x.union_id = sqlc.arg('union_id')::text)
     OR (sqlc.arg('open_id')::text <> '' AND x.open_id = sqlc.arg('open_id')::text)
+    OR (sqlc.arg('external_user_id')::text <> '' AND x.external_user_id = sqlc.arg('external_user_id')::text)
   )
 ORDER BY CASE
   WHEN sqlc.arg('union_id')::text <> '' AND x.union_id = sqlc.arg('union_id')::text THEN 0
-  ELSE 1
+  WHEN sqlc.arg('external_user_id')::text <> '' AND x.external_user_id = sqlc.arg('external_user_id')::text THEN 1
+  ELSE 2
+END
+LIMIT 1;
+
+-- name: GetWorkspaceMemberByExternalIdentity :one
+SELECT m.*
+FROM user_external_identity x
+JOIN member m ON m.user_id = x.user_id
+WHERE m.workspace_id = sqlc.arg('workspace_id')
+  AND x.provider = sqlc.arg('provider')
+  AND (
+    (sqlc.arg('external_user_id')::text <> '' AND x.external_user_id = sqlc.arg('external_user_id')::text)
+    OR (sqlc.arg('open_id')::text <> '' AND x.open_id = sqlc.arg('open_id')::text)
+    OR (sqlc.arg('union_id')::text <> '' AND x.union_id = sqlc.arg('union_id')::text)
+  )
+ORDER BY CASE
+  WHEN sqlc.arg('external_user_id')::text <> '' AND x.external_user_id = sqlc.arg('external_user_id')::text THEN 0
+  WHEN sqlc.arg('open_id')::text <> '' AND x.open_id = sqlc.arg('open_id')::text THEN 1
+  ELSE 2
 END
 LIMIT 1;
 

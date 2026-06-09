@@ -218,6 +218,28 @@ S3 앞에 CloudFront를 두는 경우 세 가지 변수가 적용됩니다: `CLO
 
 **참고:** `GITHUB_WEBHOOK_SECRET`은 설치 흐름 state token의 서명 키로 재사용되므로, 운영자는 secret 하나만 관리하면 됩니다. 이것은 GitHub App의 *Client* secret이 **아닙니다** — Client secret은 OAuth 관련이며 이 연동에서는 사용되지 않습니다. 전체 안내는 [GitHub 연동 → 자체 호스팅 설정](/github-integration#self-host-setup)을 참고하세요.
 
+## 외부 issue 가져오기
+
+Feishu Base automation 같은 외부 automation이 `POST /api/webhooks/external-issues`로 Multica issue를 만들 때 설정합니다.
+
+| 변수 | 기본값 | 설명 |
+|---|---|---|
+| `MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN` | 비어 있음 | 외부 issue import 엔드포인트에 필요한 공유 secret. 요청은 `Authorization: Bearer <token>`을 보내야 합니다. 설정하지 않으면 엔드포인트가 `503 external issue import is not configured`를 반환합니다 |
+| `MULTICA_EXTERNAL_ISSUE_DEFAULT_WORKSPACE_ID` | 비어 있음 | automation payload가 `workspace_id`를 생략할 때 사용할 기본 workspace id. Feishu Base automation은 보통 `app_token`, `table_id`, `record_id`만 보내므로 이 flow에서는 설정하세요 |
+| `MULTICA_EXTERNAL_ISSUE_DEFAULT_LARK_USER_ID` | 비어 있음 | 기본 Multica member assignee / creator로 사용할 Feishu/Lark `user_id`. 해당 Lark 계정은 대상 workspace의 Multica 사용자에 이미 연결되어 있어야 합니다 |
+
+Feishu Base automation의 HTTP step Params는 다음처럼 설정할 수 있습니다.
+
+| Param | 값 |
+|---|---|
+| `app_token` | Feishu automation의 Base app token |
+| `table_id` | Feishu automation의 table id |
+| `record_id` | Feishu automation의 record id |
+
+Multica는 Lark login app의 `LARK_APP_ID`와 `LARK_APP_SECRET`로 해당 Base record를 가져오고, `版本类型`이 `小需求`인 record만 import합니다. 첨부는 Feishu Base attachment field의 `file_token`, `name`, `size`, `type`, `url`, `tmp_url`에서 읽어 issue attachment로 업로드합니다.
+
+가져온 issue는 `backlog`에 생성되며, `origin_type=external_issue`로 멱등 처리됩니다. 같은 외부 record를 retry하면 중복 생성하지 않고 기존 issue를 반환합니다.
+
 ## 사용량 분석
 
 기본적으로 서버는 Multica의 공식 PostHog 인스턴스로 보고합니다. 옵트아웃하려면 `ANALYTICS_DISABLED=true`로 설정하세요.
