@@ -65,6 +65,12 @@ func (h *Handler) LarkLogin(w http.ResponseWriter, r *http.Request) {
 		evt.Properties["auth_method"] = "lark"
 		obsmetrics.RecordEvent(h.Analytics, h.Metrics, evt)
 	}
+	user, err = h.completeLarkLoginOnboarding(r, user)
+	if err != nil {
+		slog.Warn("lark login failed to mark onboarding complete", append(logger.RequestAttrs(r), "error", err, "user_id", uuidToString(user.ID))...)
+		writeError(w, http.StatusInternalServerError, "failed to log in with Lark")
+		return
+	}
 
 	tokenString, err := h.issueJWT(user)
 	if err != nil {
@@ -132,6 +138,28 @@ func (h *Handler) findOrCreateLarkUser(r *http.Request, profile enterpriseLark.P
 	}
 
 	return user, isNew, nil
+}
+
+func (h *Handler) completeLarkLoginOnboarding(r *http.Request, user db.User) (db.User, error) {
+	if user.OnboardedAt.Valid {
+		return user, nil
+	}
+	user, err := h.Queries.MarkUserOnboarded(r.Context(), user.ID)
+	if err != nil {
+		return user, err
+	}
+	onboardedAt := ""
+	if user.OnboardedAt.Valid {
+		onboardedAt = user.OnboardedAt.Time.UTC().Format("2006-01-02T15:04:05Z07:00")
+	}
+	obsmetrics.RecordEvent(h.Analytics, h.Metrics, analytics.OnboardingCompleted(
+		uuidToString(user.ID),
+		"",
+		analytics.OnboardingPathUnknown,
+		onboardedAt,
+		user.CloudWaitlistEmail.Valid,
+	))
+	return user, nil
 }
 
 func (h *Handler) updateUserFromLarkProfile(r *http.Request, user db.User, profile enterpriseLark.Profile) (db.User, error) {
