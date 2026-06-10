@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { api } from "@multica/core/api";
 import { issueKeys } from "@multica/core/issues/queries";
 import type { CommentTriggerPreviewAgent } from "@multica/core/types";
@@ -77,7 +77,15 @@ export function useCommentTriggerPreview({
     queryFn: () => api.previewCommentTriggers(issueId, contentRef.current, parentId),
     enabled: signature !== "empty" && debouncedSignature !== "empty",
     retry: false,
-    staleTime: Infinity,
+    // The answer depends on live queue state (pending-task dedup), not just
+    // the mention set, so a cached result must revalidate when its signature
+    // reappears — Infinity here once pinned a stale "nobody triggers"
+    // snapshot taken while the agent was still queued.
+    staleTime: 0,
+    // Keep the previous agent list while a new signature is fetching:
+    // without it the in-flight gap renders as "no agents", flickering the
+    // chips and wiping the composer's suppressed-id set.
+    placeholderData: keepPreviousData,
   });
 
   // Loading and errors intentionally surface as "no agents": the preview is

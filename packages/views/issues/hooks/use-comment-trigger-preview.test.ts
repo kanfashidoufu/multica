@@ -69,10 +69,14 @@ describe("useCommentTriggerPreview", () => {
     );
   });
 
-  it("uses the TanStack Query cache when the debounced signature repeats", async () => {
+  it("revalidates when the debounced signature repeats — the answer is queue-state dependent", async () => {
     const agentA = "00000000-0000-0000-0000-000000000001";
     const content = `[@A](mention://agent/${agentA})`;
-    const { rerender } = renderHook(
+    const agents = [
+      { id: agentA, name: "A", source: "mention_agent", reason: "" },
+    ];
+    previewCommentTriggers.mockResolvedValue({ agents });
+    const { result, rerender } = renderHook(
       ({ content }) => useCommentTriggerPreview({ issueId: "issue-1", content }),
       {
         wrapper: createWrapper(),
@@ -85,9 +89,13 @@ describe("useCommentTriggerPreview", () => {
 
     rerender({ content: "" });
     rerender({ content });
+    // Cached agents render immediately for the repeated signature (no
+    // flicker)…
     await advancePreviewDebounce();
-
-    expect(previewCommentTriggers).toHaveBeenCalledTimes(1);
+    expect(result.current.agents).toEqual(agents);
+    // …but a background revalidation still fires: an agent finishing its
+    // queued task changes the answer for the very same mention set.
+    expect(previewCommentTriggers).toHaveBeenCalledTimes(2);
   });
 
   it("fetches again when routing mention tokens change", async () => {

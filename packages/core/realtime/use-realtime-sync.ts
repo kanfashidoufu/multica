@@ -504,6 +504,12 @@ export function useRealtimeSync(
         // Squad members-status reads the same task lifecycle to flip
         // working ↔ idle for each agent member.
         invalidateSquadMemberStatusQueries(qc, wsId);
+        // Comment trigger previews answer "who would a send wake right
+        // now" — the pending-task dedup guard makes that answer
+        // queue-dependent, so any task lifecycle change must refresh an
+        // open composer's chips (e.g. an agent finishing its run becomes
+        // triggerable again mid-typing).
+        qc.invalidateQueries({ queryKey: issueKeys.commentTriggerPreviewAll() });
       },
     };
 

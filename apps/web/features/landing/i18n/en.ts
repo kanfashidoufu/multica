@@ -293,6 +293,29 @@ export function createEnDict(allowSignup: boolean): LandingDict {
     },
     entries: [
       {
+        version: "0.3.20",
+        date: "2026-06-10",
+        title: "Safer Comment Triggers and More Reliable Attachments",
+        changes: [],
+        features: [
+          "Comment boxes now show which agents or squads will start work before you send, with controls to avoid accidental runs",
+          "Run transcripts now include timestamps, making agent progress and handoffs easier to review",
+          "Autopilot detail pages now show who created each autopilot",
+          "Claude Fable 5 is now available in Multica's supported model and pricing list",
+        ],
+        improvements: [
+          "Comment trigger indicators are quieter, clearer, and less likely to crowd long agent names",
+          "Desktop now disables daemon start and stop controls when the daemon is managed outside Multica, such as in WSL2",
+        ],
+        fixes: [
+          "Inline images and files in Issue descriptions now stay visible across web and desktop after reloads",
+          "Each Issue discussion thread now keeps only one resolved answer at a time, so replacing the conclusion is consistent for everyone",
+          "Issue pages refresh their data after realtime reconnects, avoiding stale timelines after a connection drop",
+          "Agent task initiator history now works more reliably for older task records",
+          "Sticky Issue comments keep a cleaner visual edge while scrolling",
+        ],
+      },
+      {
         version: "0.3.19",
         date: "2026-06-09",
         title: "More Reliable Agents, Attachments, and Issue Threads",
