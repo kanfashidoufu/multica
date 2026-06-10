@@ -26,11 +26,13 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	enterpriseLark "github.com/multica-ai/multica/server/internal/enterprise/lark"
+	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/integrations/lark"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/storage"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 const (
@@ -100,6 +102,7 @@ type Importer struct {
 	Storage           storage.Storage
 	LarkInstallations *lark.InstallationService
 	LarkAPIClient     lark.APIClient
+	Bus               *events.Bus
 	HTTPClient        *http.Client
 	Logger            *slog.Logger
 	Config            Config
@@ -300,6 +303,7 @@ func (i *Importer) Import(ctx context.Context, req Request) (Result, error) {
 	if len(attachments) == 0 && len(attachmentRows) > 0 {
 		attachments = attachmentRows
 	}
+	i.notifyAssignee(ctx, res.Issue, assignee.UserID)
 	return Result{
 		Issue:            res.Issue,
 		Attachments:      attachments,
@@ -307,6 +311,112 @@ func (i *Importer) Import(ctx context.Context, req Request) (Result, error) {
 		Provider:         rec.Provider,
 		SourceRecordID:   rec.RecordID,
 	}, nil
+}
+
+func (i *Importer) notifyAssignee(ctx context.Context, issue db.Issue, assigneeID pgtype.UUID) {
+	if !assigneeID.Valid {
+		return
+	}
+	if err := i.Queries.AddIssueSubscriber(ctx, db.AddIssueSubscriberParams{
+		IssueID:  issue.ID,
+		UserType: "member",
+		UserID:   assigneeID,
+		Reason:   "assignee",
+	}); err != nil {
+		i.warn("external issue import: subscribe assignee failed",
+			"issue_id", util.UUIDToString(issue.ID),
+			"assignee_id", util.UUIDToString(assigneeID),
+			"error", err,
+		)
+	} else {
+		i.publishSubscriberAdded(issue, assigneeID)
+	}
+
+	details, _ := json.Marshal(map[string]any{
+		"issue_id": util.UUIDToString(issue.ID),
+		"origin":   OriginType,
+		"reason":   "assignee",
+	})
+	item, err := i.Queries.CreateInboxItem(ctx, db.CreateInboxItemParams{
+		WorkspaceID:   issue.WorkspaceID,
+		RecipientType: "member",
+		RecipientID:   assigneeID,
+		Type:          "issue_assigned",
+		Severity:      "attention",
+		IssueID:       issue.ID,
+		Title:         issue.Title,
+		Body:          pgtype.Text{},
+		ActorType:     pgtype.Text{String: "member", Valid: true},
+		ActorID:       assigneeID,
+		Details:       details,
+	})
+	if err != nil {
+		i.warn("external issue import: assignee inbox write failed",
+			"issue_id", util.UUIDToString(issue.ID),
+			"assignee_id", util.UUIDToString(assigneeID),
+			"error", err,
+		)
+		return
+	}
+	i.publishInboxNew(item, issue.Status)
+}
+
+func (i *Importer) publishSubscriberAdded(issue db.Issue, assigneeID pgtype.UUID) {
+	if i.Bus == nil {
+		return
+	}
+	i.Bus.Publish(events.Event{
+		Type:        protocol.EventSubscriberAdded,
+		WorkspaceID: util.UUIDToString(issue.WorkspaceID),
+		ActorType:   "member",
+		ActorID:     util.UUIDToString(assigneeID),
+		Payload: map[string]any{
+			"issue_id":  util.UUIDToString(issue.ID),
+			"user_type": "member",
+			"user_id":   util.UUIDToString(assigneeID),
+			"reason":    "assignee",
+		},
+	})
+}
+
+func (i *Importer) publishInboxNew(item db.InboxItem, issueStatus string) {
+	if i.Bus == nil {
+		return
+	}
+	resp := map[string]any{
+		"id":             util.UUIDToString(item.ID),
+		"workspace_id":   util.UUIDToString(item.WorkspaceID),
+		"recipient_type": item.RecipientType,
+		"recipient_id":   util.UUIDToString(item.RecipientID),
+		"type":           item.Type,
+		"severity":       item.Severity,
+		"issue_id":       util.UUIDToPtr(item.IssueID),
+		"title":          item.Title,
+		"body":           util.TextToPtr(item.Body),
+		"read":           item.Read,
+		"archived":       item.Archived,
+		"created_at":     util.TimestampToString(item.CreatedAt),
+		"actor_type":     util.TextToPtr(item.ActorType),
+		"actor_id":       util.UUIDToPtr(item.ActorID),
+		"details":        json.RawMessage(item.Details),
+		"issue_status":   issueStatus,
+	}
+	actorID := util.UUIDToString(item.ActorID)
+	i.Bus.Publish(events.Event{
+		Type:        protocol.EventInboxNew,
+		WorkspaceID: util.UUIDToString(item.WorkspaceID),
+		ActorType:   "member",
+		ActorID:     actorID,
+		Payload:     map[string]any{"item": resp},
+	})
+}
+
+func (i *Importer) warn(msg string, args ...any) {
+	if i.Logger != nil {
+		i.Logger.Warn(msg, args...)
+		return
+	}
+	slog.Warn(msg, args...)
 }
 
 func (req Request) withDefaults(cfg Config) Request {

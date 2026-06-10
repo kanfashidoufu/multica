@@ -22,6 +22,7 @@ func (h *Handler) ImportExternalIssue(w http.ResponseWriter, r *http.Request) {
 		Storage:           h.Storage,
 		LarkInstallations: h.LarkInstallations,
 		LarkAPIClient:     h.LarkAPIClient,
+		Bus:               h.Bus,
 		Logger:            slog.Default(),
 		Config: externalissue.Config{
 			WebhookToken:                  os.Getenv("MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN"),
