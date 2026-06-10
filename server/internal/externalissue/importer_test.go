@@ -85,11 +85,19 @@ func TestImportCreatesBacklogIssueAndIsIdempotent(t *testing.T) {
 			nil,
 		),
 		Storage: storage,
+		Bus:     events.New(),
 		Config: Config{
 			WebhookToken:                  "test-token",
 			DefaultAssigneeExternalUserID: fx.ExternalUserID,
 		},
 	}
+	var sawInboxEvent bool
+	importer.Bus.Subscribe("inbox:new", func(e events.Event) {
+		payload, _ := e.Payload.(map[string]any)
+		item, _ := payload["item"].(map[string]any)
+		sawInboxEvent = item["type"] == "issue_assigned" &&
+			item["recipient_id"] == util.UUIDToString(fx.User.ID)
+	})
 
 	req := Request{
 		Provider:    "lark_base",
@@ -145,6 +153,10 @@ func TestImportCreatesBacklogIssueAndIsIdempotent(t *testing.T) {
 	if want := fmt.Sprintf("!file[spec.txt](%s)", first.Attachments[0].Url); !strings.Contains(first.Issue.Description.String, want) {
 		t.Fatalf("description missing file-card markdown %q: %q", want, first.Issue.Description.String)
 	}
+	assertAssigneeSubscribedAndInbox(t, ctx, q, pool, first.Issue.ID, fx.User.ID)
+	if !sawInboxEvent {
+		t.Fatalf("external import did not publish issue_assigned inbox event")
+	}
 
 	second, err := importer.Import(ctx, req)
 	if err != nil {
@@ -156,6 +168,7 @@ func TestImportCreatesBacklogIssueAndIsIdempotent(t *testing.T) {
 	if second.Issue.ID != first.Issue.ID {
 		t.Fatalf("second issue id = %s, want %s", util.UUIDToString(second.Issue.ID), util.UUIDToString(first.Issue.ID))
 	}
+	assertAssigneeInboxCount(t, ctx, pool, first.Issue.ID, fx.User.ID, 1)
 }
 
 func TestImportFetchesLarkRecordWhenAutomationSendsOnlyRecordIDs(t *testing.T) {
@@ -454,6 +467,40 @@ func TestAttachmentSourcesSupportsLarkAttachmentFieldShape(t *testing.T) {
 	}
 	if sources[1].ContentType != "image/png" {
 		t.Fatalf("source[1] content type = %q", sources[1].ContentType)
+	}
+}
+
+func assertAssigneeSubscribedAndInbox(t *testing.T, ctx context.Context, q *db.Queries, pool *pgxpool.Pool, issueID, userID pgtype.UUID) {
+	t.Helper()
+	subscribed, err := q.IsIssueSubscriber(ctx, db.IsIssueSubscriberParams{
+		IssueID:  issueID,
+		UserType: "member",
+		UserID:   userID,
+	})
+	if err != nil {
+		t.Fatalf("IsIssueSubscriber: %v", err)
+	}
+	if !subscribed {
+		t.Fatalf("assignee was not subscribed to external issue")
+	}
+	assertAssigneeInboxCount(t, ctx, pool, issueID, userID, 1)
+}
+
+func assertAssigneeInboxCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, issueID, userID pgtype.UUID, want int) {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM inbox_item
+		WHERE issue_id = $1
+		  AND recipient_type = 'member'
+		  AND recipient_id = $2
+		  AND type = 'issue_assigned'
+	`, issueID, userID).Scan(&n); err != nil {
+		t.Fatalf("count issue_assigned inbox: %v", err)
+	}
+	if n != want {
+		t.Fatalf("issue_assigned inbox count = %d, want %d", n, want)
 	}
 }
 
