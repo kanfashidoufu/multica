@@ -75,22 +75,37 @@ func TestImportCreatesBacklogIssueAndIsIdempotent(t *testing.T) {
 	}))
 	t.Cleanup(attachmentServer.Close)
 
+	serviceBus := events.New()
 	importer := &Importer{
 		Queries: q,
 		IssueService: service.NewIssueService(
 			q,
 			pool,
-			events.New(),
+			serviceBus,
 			analytics.NoopClient{},
 			nil,
 		),
 		Storage: storage,
 		Bus:     events.New(),
+		BroadcastPayload: func(_ context.Context, issue db.Issue, attachments []db.Attachment) map[string]any {
+			return map[string]any{
+				"issue": map[string]any{
+					"id":               util.UUIDToString(issue.ID),
+					"attachment_count": len(attachments),
+				},
+			}
+		},
 		Config: Config{
 			WebhookToken:                  "test-token",
 			DefaultAssigneeExternalUserID: fx.ExternalUserID,
 		},
 	}
+	var sawCreateEvent bool
+	serviceBus.Subscribe("issue:created", func(e events.Event) {
+		payload, _ := e.Payload.(map[string]any)
+		issue, _ := payload["issue"].(map[string]any)
+		sawCreateEvent = issue["id"] != "" && issue["attachment_count"] == 1
+	})
 	var sawInboxEvent bool
 	importer.Bus.Subscribe("inbox:new", func(e events.Event) {
 		payload, _ := e.Payload.(map[string]any)
@@ -156,6 +171,9 @@ func TestImportCreatesBacklogIssueAndIsIdempotent(t *testing.T) {
 	assertAssigneeSubscribedAndInbox(t, ctx, q, pool, first.Issue.ID, fx.User.ID)
 	if !sawInboxEvent {
 		t.Fatalf("external import did not publish issue_assigned inbox event")
+	}
+	if !sawCreateEvent {
+		t.Fatalf("external import did not publish full issue:created payload")
 	}
 
 	second, err := importer.Import(ctx, req)

@@ -103,6 +103,7 @@ type Importer struct {
 	LarkInstallations *lark.InstallationService
 	LarkAPIClient     lark.APIClient
 	Bus               *events.Bus
+	BroadcastPayload  func(ctx context.Context, issue db.Issue, attachments []db.Attachment) map[string]any
 	HTTPClient        *http.Client
 	Logger            *slog.Logger
 	Config            Config
@@ -254,6 +255,16 @@ func (i *Importer) Import(ctx context.Context, req Request) (Result, error) {
 
 	attachmentIDs, attachmentRows, attachmentErrors := i.createAttachments(ctx, rec, assignee.UserID)
 	description := appendAttachmentMarkdown(rec.Description, attachmentRows)
+	createOpts := service.IssueCreateOpts{
+		ActorID:  util.UUIDToString(assignee.UserID),
+		Platform: "external_import:" + rec.Provider,
+	}
+	if i.BroadcastPayload != nil {
+		createOpts.BroadcastPayload = func(issue db.Issue, attachments []db.Attachment) map[string]any {
+			return i.BroadcastPayload(ctx, issue, attachments)
+		}
+	}
+
 	res, err := i.IssueService.Create(ctx, service.IssueCreateParams{
 		WorkspaceID:    rec.WorkspaceID,
 		Title:          rec.Title,
@@ -268,10 +279,7 @@ func (i *Importer) Import(ctx context.Context, req Request) (Result, error) {
 		OriginID:       originID,
 		AttachmentIDs:  attachmentIDs,
 		AllowDuplicate: true,
-	}, service.IssueCreateOpts{
-		ActorID:  util.UUIDToString(assignee.UserID),
-		Platform: "external_import:" + rec.Provider,
-	})
+	}, createOpts)
 	if isUniqueViolation(err, "idx_issue_external_origin_unique") {
 		existing, lookupErr := i.Queries.GetIssueByOrigin(ctx, db.GetIssueByOriginParams{
 			WorkspaceID: rec.WorkspaceID,

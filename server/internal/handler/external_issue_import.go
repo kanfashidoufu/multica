@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -12,10 +13,22 @@ import (
 	enterpriseLark "github.com/multica-ai/multica/server/internal/enterprise/lark"
 	"github.com/multica-ai/multica/server/internal/externalissue"
 	"github.com/multica-ai/multica/server/internal/logger"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 func (h *Handler) ImportExternalIssue(w http.ResponseWriter, r *http.Request) {
 	larkCfg := enterpriseLark.ConfigFromEnv()
+	buildIssueResponse := func(ctx context.Context, issue db.Issue, attachments []db.Attachment) IssueResponse {
+		prefix := h.getIssuePrefix(ctx, issue.WorkspaceID)
+		resp := issueToResponse(issue, prefix)
+		if len(attachments) > 0 {
+			resp.Attachments = make([]AttachmentResponse, len(attachments))
+			for idx, att := range attachments {
+				resp.Attachments[idx] = h.attachmentToResponse(ctx, att)
+			}
+		}
+		return resp
+	}
 	importer := &externalissue.Importer{
 		Queries:           h.Queries,
 		IssueService:      h.IssueService,
@@ -23,7 +36,10 @@ func (h *Handler) ImportExternalIssue(w http.ResponseWriter, r *http.Request) {
 		LarkInstallations: h.LarkInstallations,
 		LarkAPIClient:     h.LarkAPIClient,
 		Bus:               h.Bus,
-		Logger:            slog.Default(),
+		BroadcastPayload: func(ctx context.Context, issue db.Issue, attachments []db.Attachment) map[string]any {
+			return map[string]any{"issue": buildIssueResponse(ctx, issue, attachments)}
+		},
+		Logger: slog.Default(),
 		Config: externalissue.Config{
 			WebhookToken:                  os.Getenv("MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN"),
 			DefaultWorkspaceID:            os.Getenv("MULTICA_EXTERNAL_ISSUE_DEFAULT_WORKSPACE_ID"),
@@ -59,14 +75,7 @@ func (h *Handler) ImportExternalIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	prefix := h.getIssuePrefix(r.Context(), res.Issue.WorkspaceID)
-	resp := issueToResponse(res.Issue, prefix)
-	if len(res.Attachments) > 0 {
-		resp.Attachments = make([]AttachmentResponse, len(res.Attachments))
-		for idx, att := range res.Attachments {
-			resp.Attachments[idx] = h.attachmentToResponse(r.Context(), att)
-		}
-	}
+	resp := buildIssueResponse(r.Context(), res.Issue, res.Attachments)
 	status := http.StatusCreated
 	if res.Existing {
 		status = http.StatusOK
