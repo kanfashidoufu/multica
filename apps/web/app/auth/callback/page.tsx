@@ -7,7 +7,7 @@ import { sanitizeNextUrl, useAuthStore } from "@multica/core/auth";
 import { workspaceKeys } from "@multica/core/workspace/queries";
 import { paths, resolvePostAuthDestination } from "@multica/core/paths";
 import { api } from "@multica/core/api";
-import { validateCliCallback } from "@multica/views/auth";
+import { validateCliCallback, redirectToCliCallback } from "@multica/views/auth";
 import {
   Card,
   CardHeader,
@@ -53,18 +53,22 @@ function CallbackContent() {
     const provider = searchParams.get("provider") === "lark" ? "lark" : "google";
     const isDesktop = stateParts.includes("platform:desktop");
     const nextPart = stateParts.find((p) => p.startsWith("next:"));
-    const cliPart = stateParts.find((p) => p.startsWith("cli:"));
-    const cliStatePart = stateParts.find((p) => p.startsWith("cli_state:"));
     // Strip "next:" prefix, then drop anything that isn't a safe relative path
     // so an attacker-controlled `state=next:https://evil` cannot redirect here.
     const nextUrl = sanitizeNextUrl(
       nextPart ? safeDecodeURIComponent(nextPart.slice(5)) : null,
     );
-    const cliCallbackUrl = cliPart
-      ? safeDecodeURIComponent(cliPart.slice(4))
-      : "";
+    const cliCallbackPart =
+      stateParts.find((p) => p.startsWith("cli_callback:")) ??
+      stateParts.find((p) => p.startsWith("cli:"));
+    const cliStatePart = stateParts.find((p) => p.startsWith("cli_state:"));
+    const cliCallbackRaw = cliCallbackPart
+      ? safeDecodeURIComponent(
+          cliCallbackPart.slice(cliCallbackPart.indexOf(":") + 1),
+        )
+      : null;
     const cliState = cliStatePart
-      ? safeDecodeURIComponent(cliStatePart.slice(10))
+      ? safeDecodeURIComponent(cliStatePart.slice("cli_state:".length))
       : "";
 
     const redirectUri =
@@ -77,18 +81,20 @@ function CallbackContent() {
         : (authCode: string, uri: string) => api.googleLogin(authCode, uri);
     const storeLogin = provider === "lark" ? loginWithLark : loginWithGoogle;
 
-    if (cliCallbackUrl && !validateCliCallback(cliCallbackUrl)) {
-      setError("Invalid CLI callback URL");
-      return;
-    }
+    // Validate the CLI callback URL before redirecting — the state parameter
+    // passes through OAuth and must be treated as attacker-controlled. Lark's
+    // current login state uses the legacy `cli:` key while Google uses
+    // `cli_callback:`; accept both so either provider can complete CLI auth.
+    const cliCallback =
+      cliCallbackRaw && validateCliCallback(cliCallbackRaw)
+        ? cliCallbackRaw
+        : null;
 
-    if (cliCallbackUrl) {
+    if (cliCallback) {
       oauthLogin(code, redirectUri)
         .then(({ token }) => {
-          localStorage.setItem("multica_token", token);
           api.setToken(token);
-          const separator = cliCallbackUrl.includes("?") ? "&" : "?";
-          window.location.href = `${cliCallbackUrl}${separator}token=${encodeURIComponent(token)}&state=${encodeURIComponent(cliState)}`;
+          redirectToCliCallback(cliCallback, token, cliState);
         })
         .catch((err) => {
           setError(err instanceof Error ? err.message : "Login failed");

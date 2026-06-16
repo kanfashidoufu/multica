@@ -6,16 +6,24 @@ const {
   mockPush,
   mockSearchParams,
   mockLoginWithGoogle,
+  mockLoginWithLark,
   mockListWorkspaces,
   mockListMyInvitations,
   mockSetQueryData,
+  mockGoogleLogin,
+  mockLarkLogin,
+  mockSetToken,
 } = vi.hoisted(() => ({
   mockPush: vi.fn(),
   mockSearchParams: new URLSearchParams(),
   mockLoginWithGoogle: vi.fn(),
+  mockLoginWithLark: vi.fn(),
   mockListWorkspaces: vi.fn(),
   mockListMyInvitations: vi.fn(),
   mockSetQueryData: vi.fn(),
+  mockGoogleLogin: vi.fn(),
+  mockLarkLogin: vi.fn(),
+  mockSetToken: vi.fn(),
 }));
 
 const makeUser = (
@@ -54,7 +62,10 @@ vi.mock("@multica/core/auth", async () => {
   return {
     ...actual,
     useAuthStore: (selector: (s: unknown) => unknown) =>
-      selector({ loginWithGoogle: mockLoginWithGoogle }),
+      selector({
+        loginWithGoogle: mockLoginWithGoogle,
+        loginWithLark: mockLoginWithLark,
+      }),
   };
 });
 
@@ -69,7 +80,9 @@ vi.mock("@multica/core/api", () => ({
   api: {
     listWorkspaces: mockListWorkspaces,
     listMyInvitations: mockListMyInvitations,
-    googleLogin: vi.fn(),
+    googleLogin: mockGoogleLogin,
+    larkLogin: mockLarkLogin,
+    setToken: mockSetToken,
   },
 }));
 
@@ -94,6 +107,9 @@ describe("CallbackPage", () => {
     );
     mockSearchParams.set("code", "test-code");
     mockLoginWithGoogle.mockResolvedValue(makeUser());
+    mockLoginWithLark.mockResolvedValue(makeUser());
+    mockGoogleLogin.mockResolvedValue({ token: "google-jwt-token" });
+    mockLarkLogin.mockResolvedValue({ token: "lark-jwt-token" });
     mockListWorkspaces.mockResolvedValue([]);
     mockListMyInvitations.mockResolvedValue([]);
   });
@@ -189,12 +205,162 @@ describe("CallbackPage", () => {
     });
   });
 
+  it("uses Lark login and preserves provider redirect_uri for provider=lark callbacks", async () => {
+    mockSearchParams.set("provider", "lark");
+    mockLoginWithLark.mockResolvedValue(
+      makeUser({ onboarded_at: "2026-01-01T00:00:00Z" }),
+    );
+    mockListWorkspaces.mockResolvedValue([]);
+
+    render(<CallbackPage />);
+
+    await waitFor(() => {
+      expect(mockLoginWithLark).toHaveBeenCalledWith(
+        "test-code",
+        expect.stringContaining("/auth/callback?provider=lark"),
+      );
+    });
+    expect(mockLoginWithGoogle).not.toHaveBeenCalled();
+  });
+
   it("falls through to /workspaces/new when listMyInvitations errors", async () => {
     mockListMyInvitations.mockRejectedValue(new Error("network"));
     render(<CallbackPage />);
     await waitFor(() => {
       expect(mockPush).toHaveBeenCalledWith(paths.newWorkspace());
     });
+  });
+
+  it("redirects to CLI callback with token when state contains valid cli_callback", async () => {
+    const hrefSetter = vi.fn();
+    const originalLocation = window.location;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      writable: true,
+      value: { ...originalLocation, set href(value: string) { hrefSetter(value); } },
+    });
+
+    try {
+      mockSearchParams.set(
+        "state",
+        "cli_callback:http://127.0.0.1:46233/callback,cli_state:abc123",
+      );
+      mockGoogleLogin.mockResolvedValue({ token: "cli-jwt-token" });
+
+      render(<CallbackPage />);
+
+      await waitFor(() => {
+        expect(mockGoogleLogin).toHaveBeenCalledWith(
+          "test-code",
+          expect.stringContaining("/auth/callback"),
+        );
+      });
+
+      await waitFor(() => {
+        expect(hrefSetter).toHaveBeenCalledWith(
+          "http://127.0.0.1:46233/callback?token=cli-jwt-token&state=abc123",
+        );
+      });
+    } finally {
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: originalLocation,
+      });
+    }
+  });
+
+  it("redirects Lark CLI callbacks with a Lark token and provider redirect_uri", async () => {
+    const hrefSetter = vi.fn();
+    const originalLocation = window.location;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      writable: true,
+      value: { ...originalLocation, set href(value: string) { hrefSetter(value); } },
+    });
+
+    try {
+      mockSearchParams.set("provider", "lark");
+      mockSearchParams.set(
+        "state",
+        "cli:http://127.0.0.1:46233/callback,cli_state:lark-state",
+      );
+      mockLarkLogin.mockResolvedValue({ token: "lark-cli-jwt" });
+
+      render(<CallbackPage />);
+
+      await waitFor(() => {
+        expect(mockLarkLogin).toHaveBeenCalledWith(
+          "test-code",
+          expect.stringContaining("/auth/callback?provider=lark"),
+        );
+      });
+      expect(mockGoogleLogin).not.toHaveBeenCalled();
+
+      await waitFor(() => {
+        expect(hrefSetter).toHaveBeenCalledWith(
+          "http://127.0.0.1:46233/callback?token=lark-cli-jwt&state=lark-state",
+        );
+      });
+    } finally {
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: originalLocation,
+      });
+    }
+  });
+
+  it("falls through to normal web flow when state contains invalid cli_callback", async () => {
+    mockSearchParams.set("state", "cli_callback:https://evil.com/callback");
+    mockLoginWithGoogle.mockResolvedValue(makeUser());
+    mockListWorkspaces.mockResolvedValue([]);
+    mockListMyInvitations.mockResolvedValue([]);
+
+    render(<CallbackPage />);
+
+    await waitFor(() => {
+      // Normal web flow: loginWithGoogle is called (not googleLogin)
+      expect(mockLoginWithGoogle).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(mockPush).toHaveBeenCalledWith(paths.newWorkspace());
+    });
+  });
+
+  it("redirects to CLI callback even when state also contains platform:desktop", async () => {
+    // cli_callback takes precedence over platform:desktop — the CLI flow
+    // is a specific user intent that should not be derailed by desktop flag.
+    const hrefSetter = vi.fn();
+    const originalLocation = window.location;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      writable: true,
+      value: { ...originalLocation, set href(value: string) { hrefSetter(value); } },
+    });
+
+    try {
+      mockSearchParams.set(
+        "state",
+        "platform:desktop,cli_callback:http://localhost:12345/callback,cli_state:mystate",
+      );
+      mockGoogleLogin.mockResolvedValue({ token: "mixed-jwt" });
+
+      render(<CallbackPage />);
+
+      await waitFor(() => {
+        expect(mockGoogleLogin).toHaveBeenCalled();
+      });
+
+      await waitFor(() => {
+        expect(hrefSetter).toHaveBeenCalledWith(
+          "http://localhost:12345/callback?token=mixed-jwt&state=mystate",
+        );
+      });
+    } finally {
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: originalLocation,
+      });
+    }
   });
 
   it("onboarded users with missing source land in the workspace; the source-backfill modal is mounted there", async () => {
