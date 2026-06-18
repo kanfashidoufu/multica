@@ -939,7 +939,7 @@ func (h *Handler) CancelTaskByUser(w http.ResponseWriter, r *http.Request) {
 	if cancelled.CancelledChatMessage != nil {
 		attachments := make([]AttachmentResponse, 0, len(cancelled.CancelledChatMessage.Attachments))
 		for _, a := range cancelled.CancelledChatMessage.Attachments {
-			attachments = append(attachments, h.attachmentToResponse(a))
+			attachments = append(attachments, h.attachmentToResponse(r.Context(), a))
 		}
 		resp.CancelledChatMessage = &CancelledChatMessageResponse{
 			ChatSessionID:  cancelled.CancelledChatMessage.ChatSessionID,
