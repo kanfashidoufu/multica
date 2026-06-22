@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -44,7 +45,7 @@ const (
 	defaultAttachmentLimit  = 20
 	defaultAttachmentMax    = 100 << 20
 	defaultDownloadTimeout  = 30 * time.Second
-	defaultOpenAPITimeout   = 10 * time.Second
+	defaultOpenAPITimeout   = 30 * time.Second
 	defaultDownloadFileName = "attachment"
 	tokenSafetyMargin       = 60 * time.Second
 )
@@ -60,6 +61,7 @@ var (
 	ErrStorageNotConfigured     = errors.New("attachment storage is not configured")
 	ErrMissingLarkRecordParams  = errors.New("app_token, table_id, and record_id are required when fields are omitted")
 	ErrLarkAppNotConfigured     = errors.New("Lark app credentials are not configured")
+	ErrLarkOpenAPITimeout       = errors.New("Lark OpenAPI request timed out")
 )
 
 type Config struct {
@@ -70,6 +72,7 @@ type Config struct {
 	LarkAppSecret                 string
 	LarkOpenAPIBaseURL            string
 	AttachmentDownloadTimeout     time.Duration
+	LarkOpenAPITimeout            time.Duration
 	AttachmentMaxBytes            int64
 	AttachmentLimit               int
 }
@@ -86,6 +89,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.AttachmentDownloadTimeout <= 0 {
 		c.AttachmentDownloadTimeout = defaultDownloadTimeout
+	}
+	if c.LarkOpenAPITimeout <= 0 {
+		c.LarkOpenAPITimeout = defaultOpenAPITimeout
 	}
 	if c.AttachmentMaxBytes <= 0 {
 		c.AttachmentMaxBytes = defaultAttachmentMax
@@ -635,6 +641,8 @@ func (i *Importer) larkAppTenantAccessToken(ctx context.Context) (string, error)
 
 func (i *Importer) doLarkAppJSON(ctx context.Context, method, endpointPath, bearer string, body any, out any) error {
 	cfg := i.Config.withDefaults()
+	reqCtx, cancel := context.WithTimeout(ctx, cfg.LarkOpenAPITimeout)
+	defer cancel()
 	var reader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -643,7 +651,7 @@ func (i *Importer) doLarkAppJSON(ctx context.Context, method, endpointPath, bear
 		}
 		reader = bytes.NewReader(buf)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, cfg.LarkOpenAPIBaseURL+endpointPath, reader)
+	req, err := http.NewRequestWithContext(reqCtx, method, cfg.LarkOpenAPIBaseURL+endpointPath, reader)
 	if err != nil {
 		return err
 	}
@@ -655,10 +663,13 @@ func (i *Importer) doLarkAppJSON(ctx context.Context, method, endpointPath, bear
 	}
 	client := i.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: defaultOpenAPITimeout}
+		client = http.DefaultClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		if isTimeoutError(err) && !errors.Is(ctx.Err(), context.Canceled) {
+			return fmt.Errorf("%w: %w", ErrLarkOpenAPITimeout, err)
+		}
 		return err
 	}
 	defer resp.Body.Close()
@@ -676,6 +687,17 @@ func (i *Importer) doLarkAppJSON(ctx context.Context, method, endpointPath, bear
 		return fmt.Errorf("decode lark openapi response: %w", err)
 	}
 	return nil
+}
+
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func recordFieldsAndID(record json.RawMessage) (map[string]any, string) {

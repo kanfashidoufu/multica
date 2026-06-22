@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	enterpriseLark "github.com/multica-ai/multica/server/internal/enterprise/lark"
 	"github.com/multica-ai/multica/server/internal/externalissue"
@@ -47,6 +48,7 @@ func (h *Handler) ImportExternalIssue(w http.ResponseWriter, r *http.Request) {
 			LarkAppID:                     larkCfg.AppID,
 			LarkAppSecret:                 larkCfg.AppSecret,
 			LarkOpenAPIBaseURL:            strings.TrimSpace(os.Getenv("MULTICA_LARK_HTTP_BASE_URL")),
+			LarkOpenAPITimeout:            externalIssueDurationEnv("MULTICA_EXTERNAL_ISSUE_LARK_OPENAPI_TIMEOUT"),
 		},
 	}
 	if err := importer.VerifyToken(r.Header.Get("Authorization")); err != nil {
@@ -140,10 +142,24 @@ func writeExternalImportError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, externalissue.ErrLarkAppNotConfigured):
 		writeError(w, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, externalissue.ErrLarkOpenAPITimeout):
+		writeError(w, http.StatusGatewayTimeout, err.Error())
 	case errors.Is(err, externalissue.ErrMissingDefaultAssignee),
 		errors.Is(err, externalissue.ErrDefaultAssigneeNotMember):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, "failed to import external issue")
 	}
+}
+
+func externalIssueDurationEnv(key string) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return 0
+	}
+	v, err := time.ParseDuration(raw)
+	if err != nil || v <= 0 {
+		return 0
+	}
+	return v
 }

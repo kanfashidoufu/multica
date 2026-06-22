@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/multica-ai/multica/server/internal/externalissue"
 )
 
 func TestImportExternalIssueRequiresWebhookToken(t *testing.T) {
@@ -90,6 +92,15 @@ func TestImportExternalIssueAcceptsFeishuParamsWithoutRequestBody(t *testing.T) 
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503 from Lark app config branch; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestExternalIssueImportTimeoutReturnsGatewayTimeout(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeExternalImportError(w, externalissue.ErrLarkOpenAPITimeout)
+
+	if w.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want 504; body=%s", w.Code, w.Body.String())
 	}
 }
 

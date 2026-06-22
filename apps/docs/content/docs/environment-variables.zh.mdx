@@ -249,6 +249,7 @@ API 返回的 `download_url` 在未配置 CloudFront 签名时会指向 `GET /ap
 | `MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN` | 空 | 外部 issue 导入接口要求的共享密钥。请求必须带 `Authorization: Bearer <token>`。不设置时接口返回 `503 external issue import is not configured` |
 | `MULTICA_EXTERNAL_ISSUE_DEFAULT_WORKSPACE_ID` | 空 | 自动化请求未传 `workspace_id` 时使用的默认工作区 ID。飞书多维表格自动化通常只传 `app_token`、`table_id`、`record_id`，这种方式需要配置该变量 |
 | `MULTICA_EXTERNAL_ISSUE_DEFAULT_LARK_USER_ID` | 空 | 默认指派人和创建人使用的飞书/Lark `user_id`。对应的 Lark 账号必须已经绑定到 Multica 用户，且该用户属于目标工作区 |
+| `MULTICA_EXTERNAL_ISSUE_LARK_OPENAPI_TIMEOUT` | `30s` | 当自动化只传 `app_token`、`table_id`、`record_id` 时，Multica 服务端回查飞书 Base 记录的超时时间。使用 Go duration 格式，例如 `45s` |
 
 飞书多维表格自动化的 HTTP 节点可以把下面字段配置在 Params 中：
 

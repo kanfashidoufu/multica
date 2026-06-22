@@ -2,6 +2,7 @@ package externalissue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +26,12 @@ import (
 type memoryStorage struct {
 	mu    sync.Mutex
 	files map[string][]byte
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }
 
 func (s *memoryStorage) Upload(_ context.Context, key string, data []byte, _ string, _ string) (string, error) {
@@ -443,6 +450,25 @@ func TestVerifyToken(t *testing.T) {
 	}
 	if err := importer.VerifyToken("Bearer wrong"); err != ErrUnauthorized {
 		t.Fatalf("wrong token error = %v", err)
+	}
+}
+
+func TestLarkOpenAPITimeoutIsClassified(t *testing.T) {
+	importer := &Importer{
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, context.DeadlineExceeded
+			}),
+		},
+		Config: Config{
+			LarkOpenAPIBaseURL: "https://open.feishu.example.test",
+			LarkOpenAPITimeout: time.Second,
+		},
+	}
+
+	err := importer.doLarkAppJSON(context.Background(), http.MethodGet, "/open-apis/bitable/v1/apps/app/tables/table/records/record", "", nil, nil)
+	if !errors.Is(err, ErrLarkOpenAPITimeout) {
+		t.Fatalf("error = %v, want ErrLarkOpenAPITimeout", err)
 	}
 }
 
