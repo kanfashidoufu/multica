@@ -67,6 +67,9 @@ type IssueCreateParams struct {
 	OriginID       pgtype.UUID
 	AttachmentIDs  []pgtype.UUID
 	AllowDuplicate bool
+	// Stage groups this issue into an ordered barrier group under its parent
+	// (NULL = unstaged). See issue_child_done.go for the staged-barrier wake.
+	Stage pgtype.Int4
 }
 
 // IssueCreateOpts groups optional knobs for IssueService.Create. Most
@@ -239,6 +242,7 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 			ProjectID:     projectID,
 			OriginType:    p.OriginType,
 			OriginID:      p.OriginID,
+			Stage:         p.Stage,
 		})
 	} else {
 		issue, err = qtx.CreateIssue(ctx, db.CreateIssueParams{
@@ -257,6 +261,7 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 			DueDate:       p.DueDate,
 			Number:        issueNumber,
 			ProjectID:     projectID,
+			Stage:         p.Stage,
 		})
 	}
 	if err != nil {

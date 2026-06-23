@@ -159,6 +159,7 @@ func formatProjectResource(r ProjectResourceForEnv) string {
 // For Cursor:   writes {workDir}/AGENTS.md  (skills discovered natively from .cursor/skills/)
 // For Kimi:        writes {workDir}/AGENTS.md  (Kimi Code CLI reads AGENTS.md natively; skills auto-discovered from project skills dirs)
 // For Kiro:        writes {workDir}/AGENTS.md  (Kiro CLI reads AGENTS.md natively; skills auto-discovered from project skills dirs)
+// For Qoder:       writes {workDir}/AGENTS.md  (skills discovered from .qoder/skills/, user-level ~/.qoder/skills is unaffected)
 // For Antigravity: writes {workDir}/AGENTS.md  (agy CLI reads AGENTS.md natively; skills discovered natively from .agents/skills/ — see https://antigravity.google/docs/gcli-migration)
 func InjectRuntimeConfig(workDir, provider string, ctx TaskContextForEnv) (string, error) {
 	content := buildMetaSkillContent(provider, ctx)
@@ -179,7 +180,7 @@ func runtimeConfigPath(workDir, provider string) string {
 	switch provider {
 	case "claude", "codebuddy":
 		return filepath.Join(workDir, "CLAUDE.md")
-	case "codex", "copilot", "opencode", "openclaw", "hermes", "pi", "cursor", "kimi", "kiro", "antigravity":
+	case "codex", "copilot", "opencode", "openclaw", "hermes", "pi", "cursor", "kimi", "kiro", "antigravity", "qoder":
 		return filepath.Join(workDir, "AGENTS.md")
 	case "gemini":
 		return filepath.Join(workDir, "GEMINI.md")
@@ -474,10 +475,11 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 	b.WriteString("### Core\n")
 	b.WriteString("- `multica issue get <id> --output json` — Get full issue details.\n")
 	b.WriteString("- `multica issue comment list <issue-id> [--thread <comment-id> [--tail N] | --recent N] [--before <ts> --before-id <uuid>] [--since <RFC3339>] --output json` — List comments on an issue. Default returns the full flat timeline (server cap 2000). On busy issues prefer the thread-aware reads: `--thread <comment-id>` returns one conversation (root + every reply); `--thread <id> --tail N` caps replies to the N most recent (root is always included, even at `--tail 0`); `--recent N` returns the N most recently active threads. `--before` / `--before-id` walks older replies under `--thread --tail` (stderr label: `Next reply cursor`) or older threads under `--recent` (stderr label: `Next thread cursor`). `--since` is for incremental polling and may combine with `--thread` (with or without `--tail`) or `--recent`.\n")
-	b.WriteString("- `multica issue create --title \"...\" [--description \"...\" | --description-file <path> | --description-stdin] [--priority X] [--status X] [--assignee X | --assignee-id <uuid>] [--parent <issue-id>] [--project <project-id>] [--due-date <RFC3339>] [--attachment <path>]` — Create a new issue; `--attachment` may be repeated. For agent-authored long descriptions, prefer `--description-file <path>` — flags after a HEREDOC terminator can be silently swallowed (#4182).\n")
-	b.WriteString("- `multica issue update <id> [--title X] [--description X | --description-file <path> | --description-stdin] [--priority X] [--status X] [--assignee X | --assignee-id <uuid>] [--parent <issue-id>] [--project <project-id>] [--due-date <RFC3339>]` — Update issue fields; use `--parent \"\"` to clear parent. For agent-authored long descriptions, prefer `--description-file <path>` over stdin (#4182).\n")
+	b.WriteString("- `multica issue create --title \"...\" [--description \"...\" | --description-file <path> | --description-stdin] [--priority X] [--status X] [--assignee X | --assignee-id <uuid>] [--parent <issue-id>] [--stage N] [--project <project-id>] [--due-date <RFC3339>] [--attachment <path>]` — Create a new issue; `--attachment` may be repeated. `--stage N` (N ≥ 1) groups a sub-issue into an ordered barrier group under its parent so the parent wakes per stage, not per child. For agent-authored long descriptions, prefer `--description-file <path>` — flags after a HEREDOC terminator can be silently swallowed (#4182).\n")
+	b.WriteString("- `multica issue update <id> [--title X] [--description X | --description-file <path> | --description-stdin] [--priority X] [--status X] [--assignee X | --assignee-id <uuid>] [--parent <issue-id>] [--stage N] [--project <project-id>] [--due-date <RFC3339>]` — Update issue fields; use `--parent \"\"` to clear parent. For agent-authored long descriptions, prefer `--description-file <path>` over stdin (#4182).\n")
 	b.WriteString("- `multica repo checkout <url> [--ref <branch-or-sha>]` — Check out a repository into the working directory (creates a git worktree with a dedicated branch; use `--ref` for review/QA on a specific branch, tag, or commit)\n")
 	b.WriteString("- `multica issue status <id> <status>` — Shortcut for `issue update --status` when you only need to flip status (todo, in_progress, in_review, done, blocked, backlog, cancelled)\n")
+	b.WriteString("- `multica issue children <id> [--output json]` — List a parent's sub-issues grouped by stage (table or JSON), so you can see how many children there are, which stage each is in, and which stage to promote next.\n")
 	// Available Commands lists `multica issue comment add` with all three input
 	// modes, but the menu entry now actively steers agents away from inlining
 	// `--content` for agent-authored bodies. The prescriptive form-by-platform
@@ -562,6 +564,11 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 		b.WriteString("## Project Context\n\n")
 		if ctx.ProjectTitle != "" {
 			fmt.Fprintf(&b, "This issue belongs to **%s**.\n\n", ctx.ProjectTitle)
+		}
+		if desc := strings.TrimSpace(ctx.ProjectDescription); desc != "" {
+			b.WriteString("Project description — durable context the project owner set for every task in this project:\n\n")
+			b.WriteString(desc)
+			b.WriteString("\n\n")
 		}
 		if len(ctx.ProjectResources) > 0 {
 			b.WriteString("Project resources (also written to `.multica/project/resources.json`):\n\n")
@@ -705,6 +712,7 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 	if ctx.IssueID != "" && ctx.ChatSessionID == "" && ctx.QuickCreatePrompt == "" && ctx.AutopilotRunID == "" {
 		b.WriteString("## Sub-issue Creation\n\n")
 		b.WriteString("**Choosing `--status` when creating sub-issues.** `--status todo` = **start now** (the default — an agent assignee fires immediately). `--status backlog` = **wait** (assignee is set but no trigger fires; promote later with `multica issue status <child-id> todo`). Parallel children: all `--status todo`. Strict serial Step 1→2→3: only Step 1 is `todo`; Steps 2/3 are `--status backlog` from the start, promoted in turn.\n\n")
+		b.WriteString("**Ordering with stages.** When sub-issues run in phases or wait on each other, group them with `--stage <N>` (N ≥ 1) rather than hand-promoting the backlog chain above. Children sharing a stage run together; once a whole stage finishes (every child in it terminal — `done`/`cancelled`) you are woken once to review and promote the next stage. Create the first stage's children at `--status todo` and later stages at `--stage k --status backlog`; with no `--stage` the whole sibling set behaves as one implicit stage (woken once, when the last child finishes). Reach for stages whenever a plan has more than one step or a step must wait for a group — it is the intended way to express order, and it is cheaper than tracking the chain by hand. Run `multica issue children <id>` to see children grouped by stage before promoting.\n\n")
 	}
 
 	if len(ctx.AgentSkills) > 0 {
@@ -713,12 +721,13 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 		case "claude", "codebuddy":
 			// Claude/CodeBuddy discovers skills natively from .claude/skills/ — just list names.
 			b.WriteString("You have the following skills installed (discovered automatically):\n\n")
-		case "codex", "copilot", "opencode", "openclaw", "pi", "cursor", "kimi", "kiro", "antigravity":
-			// Codex, Copilot, OpenCode, OpenClaw, Pi, Cursor, Kimi, Kiro, and
-			// Antigravity discover skills natively from their respective paths.
+		case "codex", "copilot", "opencode", "openclaw", "pi", "cursor", "kimi", "kiro", "qoder", "antigravity":
+			// Codex, Copilot, OpenCode, OpenClaw, Pi, Cursor, Kimi, Kiro, Qoder,
+			// and Antigravity discover skills natively from their respective paths.
 			// For OpenClaw, the daemon also writes a per-task openclaw-config.json
 			// (exported via OPENCLAW_CONFIG_PATH) that pins agents.defaults.workspace
 			// to the task workdir so the CLI's scanner picks up {workDir}/skills/.
+			// Qoder discovers project skills from {workDir}/.qoder/skills/.
 			// Antigravity inherits Gemini CLI's workspace skill layout —
 			// {workDir}/.agents/skills/ — see resolveSkillsDir.
 			b.WriteString("You have the following skills installed (discovered automatically):\n\n")
