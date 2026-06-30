@@ -2,6 +2,7 @@ package externalissue
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -194,6 +195,198 @@ func TestImportCreatesBacklogIssueAndIsIdempotent(t *testing.T) {
 		t.Fatalf("second issue id = %s, want %s", util.UUIDToString(second.Issue.ID), util.UUIDToString(first.Issue.ID))
 	}
 	assertAssigneeInboxCount(t, ctx, pool, first.Issue.ID, fx.User.ID, 1)
+}
+
+func TestImportBugSyncCreatesAndUpdatesIssue(t *testing.T) {
+	ctx := context.Background()
+	pool := openTestPool(t, ctx)
+	q := db.New(pool)
+	fx := createImporterFixture(t, ctx, pool, q)
+
+	bus := events.New()
+	importer := &Importer{
+		Queries: q,
+		IssueService: service.NewIssueService(
+			q,
+			pool,
+			bus,
+			analytics.NoopClient{},
+			nil,
+		),
+		Bus: bus,
+		Config: Config{
+			WebhookToken:                  "test-token",
+			DefaultWorkspaceID:            util.UUIDToString(fx.Workspace.ID),
+			DefaultAssigneeExternalUserID: fx.ExternalUserID,
+		},
+	}
+
+	var metadataEvents int
+	bus.Subscribe("issue_metadata:changed", func(e events.Event) {
+		metadataEvents++
+	})
+	payload := BugSyncPayload{
+		SchemaVersion: "syndra.multica.version_bug.webhook.v1",
+		EventType:     "version_bug.changed",
+		EventID:       "event-1081",
+		Scene:         "frontend_debug",
+		Source:        "syndra",
+		SourceEnv:     "local",
+		SentAt:        "2026-06-30T10:50:25+08:00",
+		Items: []BugSyncItem{{
+			Event:       "upsert",
+			EntityType:  "version_bug",
+			ExternalKey: "syndra:local:version_bug:1081",
+			BugID:       1081,
+			VersionID:   163,
+			VersionName: "v2.91.56-企业一体化项目看板",
+			DemandName:  "-企业一体化项目看板",
+			Role:        "frontend",
+			Title:       "【生成报告】iOS 14.6 白屏",
+			Description: "版本：v2.91.56\n严重程度：P3\n<p>[步骤]</p><p>打开生成报告后白屏</p><br><p>[期望]</p><p>正常展示</p>",
+			Priority:    "一般",
+			BugLevel:    "P3",
+			BugTypeID:   8,
+			BugType:     "前端-开发代码",
+			Status:      "active",
+			StatusName:  "激活",
+			Creator:     BugSyncPerson{MateID: int64Ptr(2076), Name: strPtr("李景华")},
+			Assignee:    BugSyncPerson{MateID: int64Ptr(2401), Name: strPtr("刘鹏"), DeptName: strPtr("研发中心/技术部/前端组")},
+			Module:      BugSyncModule{ModuleID: 91, ModuleName: "统计"},
+			BugDetail: BugSyncDetail{
+				BugURL:    "https://zentao.lggj.work/zentao/bug-view-29593.html",
+				SourceURL: "http://192.168.215.31:9001/#/qms/bugCenter/bugManager?bugId=1081",
+				Version:   BugSyncVersion{VersionID: 163, VersionName: "v2.91.56-企业一体化项目看板", VersionType: 1, VersionStatus: 8},
+			},
+			Labels:    []string{"syndra", "frontend", "bug", "P3"},
+			SourceURL: "http://192.168.215.31:9001/#/qms/bugCenter/bugManager?bugId=1081",
+			Metadata: map[string]any{
+				"syndra_version_id": "163",
+				"syndra_role":       "frontend",
+			},
+		}},
+	}
+
+	first, err := importer.ImportBugSync(ctx, BugSyncRequest{Payload: payload})
+	if err != nil {
+		t.Fatalf("ImportBugSync first: %v", err)
+	}
+	if len(first.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(first.Items))
+	}
+	created := first.Items[0]
+	if created.Existing {
+		t.Fatalf("first import unexpectedly marked existing")
+	}
+	if created.Issue.Title != "【Bug#1081】【v2.91.56-企业一体化项目看板】【生成报告】iOS 14.6 白屏" {
+		t.Fatalf("title = %q", created.Issue.Title)
+	}
+	if created.Issue.Status != "todo" {
+		t.Fatalf("status = %q, want todo", created.Issue.Status)
+	}
+	if created.Issue.Priority != "medium" {
+		t.Fatalf("priority = %q, want medium", created.Issue.Priority)
+	}
+	if !strings.Contains(created.Issue.Description.String, "[步骤]\n打开生成报告后白屏") ||
+		!strings.Contains(created.Issue.Description.String, "[期望]\n正常展示") {
+		t.Fatalf("description was not converted from HTML: %q", created.Issue.Description.String)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(created.Issue.Metadata, &metadata); err != nil {
+		t.Fatalf("metadata decode: %v", err)
+	}
+	if metadata["bug_id"] != float64(1081) ||
+		metadata["bug_level"] != "P3" ||
+		metadata["bug_type_id"] != float64(8) ||
+		metadata["bug_creator_name"] != "李景华" ||
+		metadata["bug_module_name"] != "统计" ||
+		metadata["bug_version_status"] != float64(8) ||
+		metadata["bug_zentao_url"] != "https://zentao.lggj.work/zentao/bug-view-29593.html" ||
+		metadata["syndra_role"] != "frontend" {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+	assertAssigneeSubscribedAndInbox(t, ctx, q, pool, created.Issue.ID, fx.User.ID)
+
+	payload.Items[0].Title = "【生成报告】iOS 16.1 白屏已定位"
+	payload.Items[0].Status = "resolved"
+	payload.Items[0].StatusName = "已解决"
+	payload.Items[0].BugLevel = "P2"
+	second, err := importer.ImportBugSync(ctx, BugSyncRequest{Payload: payload})
+	if err != nil {
+		t.Fatalf("ImportBugSync second: %v", err)
+	}
+	if len(second.Items) != 1 || !second.Items[0].Existing {
+		t.Fatalf("second result = %#v, want existing item", second.Items)
+	}
+	updated := second.Items[0].Issue
+	if updated.ID != created.Issue.ID {
+		t.Fatalf("updated issue id = %s, want %s", util.UUIDToString(updated.ID), util.UUIDToString(created.Issue.ID))
+	}
+	if updated.Title != "【Bug#1081】【v2.91.56-企业一体化项目看板】【生成报告】iOS 16.1 白屏已定位" || updated.Status != "done" || updated.Priority != "high" {
+		t.Fatalf("updated issue = title %q status %q priority %q", updated.Title, updated.Status, updated.Priority)
+	}
+	if metadataEvents < 2 {
+		t.Fatalf("metadata event count = %d, want at least 2", metadataEvents)
+	}
+	assertAssigneeInboxCount(t, ctx, pool, created.Issue.ID, fx.User.ID, 1)
+}
+
+func TestImportBugSyncAssignsMappedBugAssignee(t *testing.T) {
+	ctx := context.Background()
+	pool := openTestPool(t, ctx)
+	q := db.New(pool)
+	fx := createImporterFixture(t, ctx, pool, q)
+	bugAssignee := createImporterWorkspaceMember(t, ctx, pool, q, fx.Workspace.ID, "刘鹏", "")
+
+	bus := events.New()
+	importer := &Importer{
+		Queries: q,
+		IssueService: service.NewIssueService(
+			q,
+			pool,
+			bus,
+			analytics.NoopClient{},
+			nil,
+		),
+		Bus: bus,
+		Config: Config{
+			WebhookToken:                  "test-token",
+			DefaultWorkspaceID:            util.UUIDToString(fx.Workspace.ID),
+			DefaultAssigneeExternalUserID: fx.ExternalUserID,
+		},
+	}
+
+	res, err := importer.ImportBugSync(ctx, BugSyncRequest{
+		Payload: BugSyncPayload{
+			Source:    "syndra",
+			SourceEnv: "local",
+			Items: []BugSyncItem{{
+				Event:       "upsert",
+				EntityType:  "version_bug",
+				ExternalKey: "syndra:local:version_bug:mapped-assignee",
+				BugID:       1081,
+				Title:       "按 Bug 指派人分配",
+				BugLevel:    "P3",
+				Status:      "active",
+				Assignee:    BugSyncPerson{MateID: int64Ptr(2401), Name: strPtr("刘鹏")},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ImportBugSync: %v", err)
+	}
+	if len(res.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(res.Items))
+	}
+	issue := res.Items[0].Issue
+	if issue.AssigneeType.String != "member" || issue.AssigneeID != bugAssignee.User.ID {
+		t.Fatalf("assignee = (%q, %s), want member %s", issue.AssigneeType.String, util.UUIDToString(issue.AssigneeID), util.UUIDToString(bugAssignee.User.ID))
+	}
+	if issue.CreatorID != bugAssignee.User.ID {
+		t.Fatalf("creator = %s, want matched assignee %s", util.UUIDToString(issue.CreatorID), util.UUIDToString(bugAssignee.User.ID))
+	}
+	assertAssigneeSubscribedAndInbox(t, ctx, q, pool, issue.ID, bugAssignee.User.ID)
+	assertAssigneeInboxCount(t, ctx, pool, issue.ID, fx.User.ID, 0)
 }
 
 func TestImportFetchesLarkRecordWhenAutomationSendsOnlyRecordIDs(t *testing.T) {
@@ -416,6 +609,36 @@ func TestDecodeRequestSupportsRecordEnvelopeAndNumericFields(t *testing.T) {
 	}
 }
 
+func TestDecodeBugSyncRequestUnwrapsDebugPushResponse(t *testing.T) {
+	payload, err := DecodeBugSyncRequest(strings.NewReader(`{
+		"code": 4000,
+		"success": true,
+		"data": {
+			"dry_run": true,
+			"payload": {
+				"schema_version": "syndra.multica.version_bug.webhook.v1",
+				"source": "syndra",
+				"items": [{
+					"event": "upsert",
+					"entity_type": "version_bug",
+					"external_key": "syndra:local:version_bug:1081",
+					"bug_id": 1081,
+					"title": "白屏"
+				}]
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("DecodeBugSyncRequest: %v", err)
+	}
+	if payload.SchemaVersion != "syndra.multica.version_bug.webhook.v1" || len(payload.Items) != 1 {
+		t.Fatalf("payload = %#v", payload)
+	}
+	if payload.Items[0].ExternalKey != "syndra:local:version_bug:1081" {
+		t.Fatalf("external key = %q", payload.Items[0].ExternalKey)
+	}
+}
+
 func TestDecodeRequestUsesRecordIDWithTopLevelFields(t *testing.T) {
 	req, err := DecodeRequest(strings.NewReader(`{
 		"workspace_id": "11111111-1111-1111-1111-111111111111",
@@ -548,9 +771,23 @@ func assertAssigneeInboxCount(t *testing.T, ctx context.Context, pool *pgxpool.P
 	}
 }
 
+func strPtr(v string) *string {
+	return &v
+}
+
+func int64Ptr(v int64) *int64 {
+	return &v
+}
+
 type importerFixture struct {
 	Workspace      db.Workspace
 	User           db.User
+	ExternalUserID string
+}
+
+type importerMemberFixture struct {
+	User           db.User
+	Member         db.Member
 	ExternalUserID string
 }
 
@@ -628,6 +865,54 @@ func createImporterFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 	return importerFixture{
 		Workspace:      workspace,
 		User:           user,
+		ExternalUserID: externalUserID,
+	}
+}
+
+func createImporterWorkspaceMember(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *db.Queries, workspaceID pgtype.UUID, name, externalUserID string) importerMemberFixture {
+	t.Helper()
+	suffix := time.Now().UnixNano()
+	user, err := q.CreateUser(ctx, db.CreateUserParams{
+		Name:      name,
+		Email:     fmt.Sprintf("external-issue-import-member-%d@example.test", suffix),
+		AvatarUrl: pgtype.Text{},
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM "user" WHERE id = $1`, user.ID)
+	})
+
+	member, err := q.CreateMember(ctx, db.CreateMemberParams{
+		WorkspaceID: workspaceID,
+		UserID:      user.ID,
+		Role:        "member",
+	})
+	if err != nil {
+		t.Fatalf("CreateMember: %v", err)
+	}
+
+	if externalUserID != "" {
+		if _, err := q.UpsertUserExternalIdentityByOpenID(ctx, db.UpsertUserExternalIdentityByOpenIDParams{
+			UserID:         user.ID,
+			Provider:       enterpriseLark.ProviderName,
+			TenantKey:      "tenant-test",
+			ExternalUserID: pgtype.Text{String: externalUserID, Valid: true},
+			OpenID:         pgtype.Text{String: fmt.Sprintf("open_%s_%d", externalUserID, suffix), Valid: true},
+			UnionID:        pgtype.Text{String: fmt.Sprintf("union_%s_%d", externalUserID, suffix), Valid: true},
+			Email:          pgtype.Text{String: user.Email, Valid: true},
+			Name:           pgtype.Text{String: user.Name, Valid: true},
+			AvatarUrl:      pgtype.Text{},
+			RawProfile:     []byte(`{"source":"test"}`),
+		}); err != nil {
+			t.Fatalf("UpsertUserExternalIdentityByOpenID: %v", err)
+		}
+	}
+
+	return importerMemberFixture{
+		User:           user,
+		Member:         member,
 		ExternalUserID: externalUserID,
 	}
 }

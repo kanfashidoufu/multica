@@ -272,6 +272,20 @@ WHERE workspace_id = $1
   AND origin_id = $3
 LIMIT 1;
 
+-- name: UpdateIssueFromExternalSync :one
+-- External webhooks own their mirrored title/description/status/priority and
+-- compact source metadata, but must not overwrite scheduling, assignee,
+-- hierarchy, or project fields maintained inside Multica.
+UPDATE issue SET
+    title = $1,
+    description = $2,
+    status = $3,
+    priority = $4,
+    metadata = $5,
+    updated_at = now()
+WHERE id = $6 AND workspace_id = $7
+RETURNING *;
+
 -- name: CountCreatedIssueAssignees :many
 -- Count assignees on issues created by a specific user.
 SELECT

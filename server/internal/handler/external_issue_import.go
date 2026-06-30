@@ -55,6 +55,10 @@ func (h *Handler) ImportExternalIssue(w http.ResponseWriter, r *http.Request) {
 		writeExternalImportError(w, err)
 		return
 	}
+	if isExternalBugSyncProbe(r.URL.Query()) {
+		handleExternalBugSync(w, r, importer, buildIssueResponse)
+		return
+	}
 
 	req, err := decodeExternalIssueImportRequest(r)
 	if err != nil {
@@ -90,6 +94,92 @@ func (h *Handler) ImportExternalIssue(w http.ResponseWriter, r *http.Request) {
 		"issue":             resp,
 		"attachment_errors": res.AttachmentErrors,
 	})
+}
+
+func isExternalBugSyncProbe(values url.Values) bool {
+	return strings.EqualFold(strings.TrimSpace(values.Get("sync_type")), "bug")
+}
+
+func handleExternalBugSync(w http.ResponseWriter, r *http.Request, importer *externalissue.Importer, buildIssueResponse func(context.Context, db.Issue, []db.Attachment) IssueResponse) {
+	req, err := decodeExternalBugSyncRequest(r)
+	if err != nil {
+		slog.Warn("external bug sync decode failed",
+			append(logger.RequestAttrs(r), "error", err)...)
+		writeError(w, http.StatusBadRequest, "invalid bug sync request body")
+		return
+	}
+	res, err := importer.ImportBugSync(r.Context(), req)
+	if err != nil {
+		slog.Warn("external bug sync failed", append(logger.RequestAttrs(r), "error", err)...)
+		writeExternalImportError(w, err)
+		return
+	}
+	items := make([]map[string]any, 0, len(res.Items))
+	created := false
+	synced := 0
+	ignored := 0
+	for _, item := range res.Items {
+		body := map[string]any{
+			"provider":         item.Provider,
+			"source_record_id": item.SourceRecordID,
+			"external_key":     item.ExternalKey,
+			"bug_id":           item.BugID,
+		}
+		if item.Ignored {
+			ignored++
+			body["status"] = "ignored"
+			body["reason"] = item.Reason
+		} else {
+			synced++
+			body["status"] = "synced"
+			body["existing"] = item.Existing
+			if !item.Existing {
+				created = true
+			}
+			if item.Issue.ID.Valid {
+				body["issue"] = buildIssueResponse(r.Context(), item.Issue, nil)
+			}
+		}
+		items = append(items, body)
+	}
+
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	resp := map[string]any{
+		"status":     "synced",
+		"sync_type":  "bug",
+		"provider":   res.Provider,
+		"item_count": len(res.Items),
+		"synced":     synced,
+		"ignored":    ignored,
+		"items":      items,
+	}
+	if len(res.Items) == 1 && !res.Items[0].Ignored {
+		item := res.Items[0]
+		resp["existing"] = item.Existing
+		resp["source_record_id"] = item.SourceRecordID
+		resp["external_key"] = item.ExternalKey
+		resp["bug_id"] = item.BugID
+		resp["issue"] = buildIssueResponse(r.Context(), item.Issue, nil)
+	}
+	writeJSON(w, status, resp)
+}
+
+func decodeExternalBugSyncRequest(r *http.Request) (externalissue.BugSyncRequest, error) {
+	var req externalissue.BugSyncRequest
+	if r.Body == nil {
+		return req, io.EOF
+	}
+	payload, err := externalissue.DecodeBugSyncRequest(r.Body)
+	if err != nil {
+		return req, err
+	}
+	req.Payload = payload
+	setStringParam(r.URL.Query(), "workspace_id", &req.WorkspaceID)
+	setStringParam(r.URL.Query(), "assignee_user_id", &req.AssigneeUserID)
+	return req, nil
 }
 
 func decodeExternalIssueImportRequest(r *http.Request) (externalissue.Request, error) {
