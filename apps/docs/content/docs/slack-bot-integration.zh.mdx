@@ -43,6 +43,7 @@ oauth_config:
       - im:history
       - mpim:history
       - chat:write
+      - reactions:write
       - users:read
 settings:
   event_subscriptions:
@@ -66,6 +67,7 @@ settings:
 | `app_home.messages_tab_enabled: true` | 让成员能打开 Bot 并**私聊**它。没有它，Bot 就无法被直接发消息。 |
 | `bot_user` | 创建被 @ 和发回复用的那个 Bot 身份。 |
 | `chat:write` | 把智能体的回复发回 Slack。 |
+| `reactions:write` | 智能体处理期间在你的消息上加一个 👀 表情，回复后再移除。没有这个权限时，该提示会被静默跳过——其他功能都不受影响。 |
 | `app_mentions:read` + `app_mention` 事件 | 接收频道里的 @ 提及。 |
 | `im:history` + `message.im` | 接收发给 Bot 的**私聊**（每一条私聊消息都会被读取）。 |
 | `channels:history` / `groups:history` / `mpim:history` + 对应的 `message.*` 事件 | 接收公开频道、私有频道和群组私聊里的消息。在这些场景里，Bot 只对 **@ 了**它的消息做出响应。 |

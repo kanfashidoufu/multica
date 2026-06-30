@@ -43,6 +43,7 @@ oauth_config:
       - im:history
       - mpim:history
       - chat:write
+      - reactions:write
       - users:read
 settings:
   event_subscriptions:
@@ -66,6 +67,7 @@ settings:
 | `app_home.messages_tab_enabled: true` | メンバーが Bot を開いて **DM** できるようにします。これがないと、Bot に直接メッセージを送れません。 |
 | `bot_user` | @ メンションされ、返信を投稿する Bot のアイデンティティを作成します。 |
 | `chat:write` | エージェントの返信を Slack に投稿し返します。 |
+| `reactions:write` | エージェントの処理中、あなたのメッセージに 👀 リアクションを付け、返信時に外します。このスコープがないとインジケーターは黙ってスキップされます——他の機能はすべて動作します。 |
 | `app_mentions:read` + `app_mention` イベント | チャンネルでの @ メンションを受け取ります。 |
 | `im:history` + `message.im` | Bot への **DM** を受け取ります（すべての DM メッセージが読み取られます）。 |
 | `channels:history` / `groups:history` / `mpim:history` + 対応する `message.*` イベント | パブリックチャンネル、プライベートチャンネル、グループ DM のメッセージを受け取ります。これらの中では、Bot は自分を **@ メンション**したメッセージにのみ反応します。 |

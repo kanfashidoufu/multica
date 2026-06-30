@@ -459,8 +459,22 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				AppURL: appURLFromEnv(),
 				Logger: slog.Default(),
 			})
-			channelRouter.Register(slack.TypeSlack, slack.NewSlackResolverSet(queries, pool, slackReplier))
+			// Typing indicator (MUL-3874): a 👀 reaction on the user's message
+			// while the agent works, cleared when the run finishes or fails.
+			// Best-effort; failures are logged only. Registered before the
+			// outbound reply subscriber so, on EventChatDone, the reaction clears
+			// ahead of the reply (bus delivery is synchronous, in subscription
+			// order). Subscribing here is also the only path that clears the
+			// reaction on a failed run, which the outbound replier does not handle.
+			slackTyping := slack.NewTypingIndicatorManager(queries, box.Open, slog.Default())
+			slackTyping.Register(bus)
+			channelRouter.Register(slack.TypeSlack, slack.NewSlackResolverSet(queries, pool, slackReplier, slackTyping))
 			slack.NewOutbound(queries, box.Open, slog.Default()).Register(bus)
+
+			// On-demand history reader behind the unified `multica chat history`
+			// command (MUL-3871): pull the session's Slack conversation when the
+			// agent asks, instead of force-assembling it on every inbound.
+			h.SlackHistory = slack.NewHistory(queries, box.Open, slog.Default())
 
 			// Per-installation inbound: the Supervisor builds + supervises one
 			// Socket Mode connection per active Slack installation, authenticated
@@ -971,6 +985,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 						r.Post("/rotate-webhook-token", h.RotateAutopilotTriggerWebhookToken)
 						r.Put("/signing-secret", h.SetAutopilotTriggerSigningSecret)
 					})
+					r.Post("/collaborators", h.AddAutopilotCollaborator)
+					r.Delete("/collaborators/{userId}", h.RemoveAutopilotCollaborator)
 				})
 			})
 
@@ -1138,6 +1154,13 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				})
 			})
 			r.Get("/api/chat/pending-tasks", h.ListPendingChatTasks)
+
+			// Agent-facing unified history read: `multica chat history` resolves
+			// the caller's task-scoped token to its own chat session and returns
+			// the bound channel's prior messages (MUL-3871). No session id is
+			// passed — the token IS the scope, so an agent can only read its own
+			// conversation.
+			r.Get("/api/chat/history", h.GetChatChannelHistory)
 
 			// Inbox
 			r.Route("/api/inbox", func(r chi.Router) {
