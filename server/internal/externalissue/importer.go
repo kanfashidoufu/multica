@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	htmlstd "html"
 	"io"
 	"log/slog"
 	"mime"
@@ -16,11 +17,13 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -42,12 +45,16 @@ const (
 	defaultStatus           = "backlog"
 	defaultPriority         = "none"
 	defaultProvider         = "lark_base"
+	defaultBugProvider      = "syndra"
+	defaultBugStatus        = "todo"
 	defaultAttachmentLimit  = 20
 	defaultAttachmentMax    = 100 << 20
 	defaultDownloadTimeout  = 30 * time.Second
 	defaultOpenAPITimeout   = 30 * time.Second
 	defaultDownloadFileName = "attachment"
 	tokenSafetyMargin       = 60 * time.Second
+	maxBugMetadataKeys      = 50
+	maxBugMetadataStringLen = 1000
 )
 
 var (
@@ -62,6 +69,13 @@ var (
 	ErrMissingLarkRecordParams  = errors.New("app_token, table_id, and record_id are required when fields are omitted")
 	ErrLarkAppNotConfigured     = errors.New("Lark app credentials are not configured")
 	ErrLarkOpenAPITimeout       = errors.New("Lark OpenAPI request timed out")
+)
+
+var (
+	bugBreakTagRE     = regexp.MustCompile(`(?i)<\s*br\s*/?\s*>|</\s*(p|div|section|li|tr)\s*>`)
+	bugBlockOpenTagRE = regexp.MustCompile(`(?i)<\s*(p|div|section|tr)\b[^>]*>`)
+	bugListOpenTagRE  = regexp.MustCompile(`(?i)<\s*li\b[^>]*>`)
+	bugAnyTagRE       = regexp.MustCompile(`(?s)<[^>]*>`)
 )
 
 type Config struct {
@@ -137,6 +151,118 @@ type Request struct {
 	AllowDuplicate bool            `json:"allow_duplicate,omitempty"`
 }
 
+type BugSyncRequest struct {
+	WorkspaceID    string
+	AssigneeUserID string
+	Payload        BugSyncPayload
+}
+
+type BugSyncPayload struct {
+	SchemaVersion string        `json:"schema_version,omitempty"`
+	EventType     string        `json:"event_type,omitempty"`
+	EventID       string        `json:"event_id,omitempty"`
+	Scene         string        `json:"scene,omitempty"`
+	Source        string        `json:"source,omitempty"`
+	SourceEnv     string        `json:"source_env,omitempty"`
+	SentAt        string        `json:"sent_at,omitempty"`
+	ItemCount     int           `json:"item_count,omitempty"`
+	ItemIDs       string        `json:"item_ids,omitempty"`
+	Items         []BugSyncItem `json:"items,omitempty"`
+}
+
+type BugSyncItem struct {
+	Event               string         `json:"event,omitempty"`
+	EntityType          string         `json:"entity_type,omitempty"`
+	ExternalKey         string         `json:"external_key,omitempty"`
+	BugID               int64          `json:"bug_id,omitempty"`
+	VersionID           int64          `json:"version_id,omitempty"`
+	VersionName         string         `json:"version_name,omitempty"`
+	DemandName          string         `json:"demand_name,omitempty"`
+	Role                string         `json:"role,omitempty"`
+	Title               string         `json:"title,omitempty"`
+	Description         string         `json:"description,omitempty"`
+	Priority            string         `json:"priority,omitempty"`
+	BugLevel            string         `json:"bug_level,omitempty"`
+	BugTypeID           int64          `json:"bug_type_id,omitempty"`
+	BugType             string         `json:"bug_type,omitempty"`
+	Status              string         `json:"status,omitempty"`
+	StatusName          string         `json:"status_name,omitempty"`
+	ResolveSolution     any            `json:"resolve_solution,omitempty"`
+	ResolveSolutionName string         `json:"resolve_solution_name,omitempty"`
+	Owner               BugSyncPerson  `json:"owner,omitempty"`
+	Creator             BugSyncPerson  `json:"creator,omitempty"`
+	Assignee            BugSyncPerson  `json:"assignee,omitempty"`
+	Solver              BugSyncPerson  `json:"solver,omitempty"`
+	Module              BugSyncModule  `json:"module,omitempty"`
+	DuplicateBug        any            `json:"duplicate_bug,omitempty"`
+	Attachments         []BugSyncMedia `json:"attachments,omitempty"`
+	Videos              []BugSyncMedia `json:"videos,omitempty"`
+	BugDetail           BugSyncDetail  `json:"bug_detail,omitempty"`
+	Labels              []string       `json:"labels,omitempty"`
+	SourceURL           string         `json:"source_url,omitempty"`
+	CreatedAt           string         `json:"created_at,omitempty"`
+	UpdatedAt           string         `json:"updated_at,omitempty"`
+	Metadata            map[string]any `json:"metadata,omitempty"`
+}
+
+type BugSyncPerson struct {
+	MateID   *int64  `json:"mate_id,omitempty"`
+	Name     *string `json:"name,omitempty"`
+	DeptName *string `json:"dept_name,omitempty"`
+}
+
+type BugSyncModule struct {
+	ModuleID   int64  `json:"module_id,omitempty"`
+	ModuleName string `json:"module_name,omitempty"`
+}
+
+type BugSyncMedia struct {
+	Name      string `json:"name,omitempty"`
+	URL       string `json:"url,omitempty"`
+	FileURL   string `json:"file_url,omitempty"`
+	FileToken string `json:"file_token,omitempty"`
+}
+
+type BugSyncDetail struct {
+	BugID               int64          `json:"bug_id,omitempty"`
+	Title               string         `json:"title,omitempty"`
+	Description         string         `json:"description,omitempty"`
+	BugLevel            string         `json:"bug_level,omitempty"`
+	Priority            string         `json:"priority,omitempty"`
+	BugTypeID           int64          `json:"bug_type_id,omitempty"`
+	BugTypeName         string         `json:"bug_type_name,omitempty"`
+	Status              string         `json:"status,omitempty"`
+	StatusName          string         `json:"status_name,omitempty"`
+	ResolveSolution     any            `json:"resolve_solution,omitempty"`
+	ResolveSolutionName string         `json:"resolve_solution_name,omitempty"`
+	DuplicateBug        any            `json:"duplicate_bug,omitempty"`
+	Module              BugSyncModule  `json:"module,omitempty"`
+	Version             BugSyncVersion `json:"version,omitempty"`
+	Creator             BugSyncPerson  `json:"creator,omitempty"`
+	Assignee            BugSyncPerson  `json:"assignee,omitempty"`
+	Solver              BugSyncPerson  `json:"solver,omitempty"`
+	Deadline            string         `json:"deadline,omitempty"`
+	BugSolveTime        string         `json:"bug_solve_time,omitempty"`
+	ReopenCount         int64          `json:"reopen_count,omitempty"`
+	LowBug              int64          `json:"low_bug,omitempty"`
+	IsBug               int64          `json:"is_bug,omitempty"`
+	CaseID              int64          `json:"case_id,omitempty"`
+	BugURL              string         `json:"bug_url,omitempty"`
+	SourceURL           string         `json:"source_url,omitempty"`
+	Attachments         []BugSyncMedia `json:"attachments,omitempty"`
+	Videos              []BugSyncMedia `json:"videos,omitempty"`
+	CreatedAt           string         `json:"created_at,omitempty"`
+	UpdatedAt           string         `json:"updated_at,omitempty"`
+}
+
+type BugSyncVersion struct {
+	VersionID     int64  `json:"version_id,omitempty"`
+	VersionName   string `json:"version_name,omitempty"`
+	DemandName    string `json:"demand_name,omitempty"`
+	VersionType   int64  `json:"version_type,omitempty"`
+	VersionStatus int64  `json:"version_status,omitempty"`
+}
+
 type FieldMapping struct {
 	VersionType string `json:"version_type,omitempty"`
 	Version     string `json:"version,omitempty"`
@@ -154,6 +280,22 @@ type Result struct {
 	AttachmentErrors []AttachmentError
 	Provider         string
 	SourceRecordID   string
+}
+
+type BugSyncResult struct {
+	Provider string
+	Items    []BugSyncItemResult
+}
+
+type BugSyncItemResult struct {
+	Ignored        bool
+	Reason         string
+	Issue          db.Issue
+	Existing       bool
+	Provider       string
+	SourceRecordID string
+	ExternalKey    string
+	BugID          int64
 }
 
 type AttachmentError struct {
@@ -327,6 +469,194 @@ func (i *Importer) Import(ctx context.Context, req Request) (Result, error) {
 	}, nil
 }
 
+func (i *Importer) ImportBugSync(ctx context.Context, req BugSyncRequest) (BugSyncResult, error) {
+	cfg := i.Config.withDefaults()
+	if cfg.WebhookToken == "" {
+		return BugSyncResult{}, ErrNotConfigured
+	}
+	if i.Queries == nil || i.IssueService == nil {
+		return BugSyncResult{}, errors.New("external issue importer is not wired")
+	}
+
+	workspaceIDRaw := firstNonEmpty(req.WorkspaceID, cfg.DefaultWorkspaceID)
+	if workspaceIDRaw == "" {
+		return BugSyncResult{}, ErrMissingWorkspaceID
+	}
+	workspaceID, err := util.ParseUUID(workspaceIDRaw)
+	if err != nil {
+		return BugSyncResult{}, ErrMissingWorkspaceID
+	}
+
+	defaultUserID := firstNonEmpty(strings.TrimSpace(req.AssigneeUserID), cfg.DefaultAssigneeExternalUserID)
+	if defaultUserID == "" {
+		return BugSyncResult{}, ErrMissingDefaultAssignee
+	}
+	defaultAssignee, err := i.resolveMemberByExternalUserID(ctx, workspaceID, defaultUserID)
+	if err != nil {
+		return BugSyncResult{}, err
+	}
+
+	provider := bugProvider(req.Payload)
+	result := BugSyncResult{Provider: provider}
+	for _, item := range req.Payload.Items {
+		assignee, err := i.resolveBugAssigneeMember(ctx, workspaceID, item, defaultAssignee)
+		if err != nil {
+			return result, err
+		}
+		itemResult, err := i.importBugSyncItem(ctx, req.Payload, item, workspaceID, assignee.UserID)
+		if err != nil {
+			return result, err
+		}
+		result.Items = append(result.Items, itemResult)
+	}
+	return result, nil
+}
+
+func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload, item BugSyncItem, workspaceID pgtype.UUID, assigneeID pgtype.UUID) (BugSyncItemResult, error) {
+	provider := bugProvider(payload)
+	recordID := bugRecordID(item)
+	if recordID == "" {
+		return BugSyncItemResult{}, ErrMissingRecordID
+	}
+	if !bugSyncEventSupported(item.Event) {
+		return BugSyncItemResult{
+			Ignored:        true,
+			Reason:         "unsupported_event",
+			Provider:       provider,
+			SourceRecordID: recordID,
+			ExternalKey:    item.ExternalKey,
+			BugID:          item.BugID,
+		}, nil
+	}
+
+	originID := sourceOriginID(provider, payload.SourceEnv, firstNonEmpty(item.EntityType, "version_bug"), recordID)
+	title := bugIssueTitle(item)
+	if title == "" {
+		return BugSyncItemResult{}, ErrMissingTitle
+	}
+	description := bugIssueDescription(item)
+	status := bugIssueStatus(item)
+	priority := bugIssuePriority(item)
+	metadata := bugIssueMetadata(payload, item, provider, recordID)
+	metadataBytes, err := json.Marshal(metadata)
+	if err != nil {
+		return BugSyncItemResult{}, err
+	}
+
+	existing, err := i.Queries.GetIssueByOrigin(ctx, db.GetIssueByOriginParams{
+		WorkspaceID: workspaceID,
+		OriginType:  pgtype.Text{String: OriginType, Valid: true},
+		OriginID:    originID,
+	})
+	if err == nil {
+		updated, err := i.Queries.UpdateIssueFromExternalSync(ctx, db.UpdateIssueFromExternalSyncParams{
+			Title:       title,
+			Description: util.StrToText(description),
+			Status:      status,
+			Priority:    priority,
+			Metadata:    metadataBytes,
+			ID:          existing.ID,
+			WorkspaceID: existing.WorkspaceID,
+		})
+		if err != nil {
+			return BugSyncItemResult{}, fmt.Errorf("update external bug issue: %w", err)
+		}
+		i.publishExternalIssueUpdated(ctx, existing, updated, "external_bug_sync")
+		i.publishIssueMetadataChanged(updated, "external_bug_sync")
+		return BugSyncItemResult{
+			Issue:          updated,
+			Existing:       true,
+			Provider:       provider,
+			SourceRecordID: recordID,
+			ExternalKey:    item.ExternalKey,
+			BugID:          item.BugID,
+		}, nil
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return BugSyncItemResult{}, fmt.Errorf("lookup existing bug issue by origin: %w", err)
+	}
+
+	createOpts := service.IssueCreateOpts{
+		ActorID:  util.UUIDToString(assigneeID),
+		Platform: "external_import:" + provider,
+	}
+	if i.BroadcastPayload != nil {
+		createOpts.BroadcastPayload = func(issue db.Issue, attachments []db.Attachment) map[string]any {
+			return i.BroadcastPayload(ctx, issue, attachments)
+		}
+	}
+	res, err := i.IssueService.Create(ctx, service.IssueCreateParams{
+		WorkspaceID:    workspaceID,
+		Title:          title,
+		Description:    util.StrToText(description),
+		Status:         status,
+		Priority:       priority,
+		AssigneeType:   pgtype.Text{String: "member", Valid: true},
+		AssigneeID:     assigneeID,
+		CreatorType:    "member",
+		CreatorID:      assigneeID,
+		OriginType:     pgtype.Text{String: OriginType, Valid: true},
+		OriginID:       originID,
+		AllowDuplicate: true,
+	}, createOpts)
+	if isUniqueViolation(err, "idx_issue_external_origin_unique") {
+		existing, lookupErr := i.Queries.GetIssueByOrigin(ctx, db.GetIssueByOriginParams{
+			WorkspaceID: workspaceID,
+			OriginType:  pgtype.Text{String: OriginType, Valid: true},
+			OriginID:    originID,
+		})
+		if lookupErr == nil {
+			updated, updateErr := i.Queries.UpdateIssueFromExternalSync(ctx, db.UpdateIssueFromExternalSyncParams{
+				Title:       title,
+				Description: util.StrToText(description),
+				Status:      status,
+				Priority:    priority,
+				Metadata:    metadataBytes,
+				ID:          existing.ID,
+				WorkspaceID: existing.WorkspaceID,
+			})
+			if updateErr != nil {
+				return BugSyncItemResult{}, fmt.Errorf("update raced external bug issue: %w", updateErr)
+			}
+			i.publishExternalIssueUpdated(ctx, existing, updated, "external_bug_sync")
+			i.publishIssueMetadataChanged(updated, "external_bug_sync")
+			return BugSyncItemResult{
+				Issue:          updated,
+				Existing:       true,
+				Provider:       provider,
+				SourceRecordID: recordID,
+				ExternalKey:    item.ExternalKey,
+				BugID:          item.BugID,
+			}, nil
+		}
+	}
+	if err != nil {
+		return BugSyncItemResult{}, err
+	}
+
+	updated, err := i.Queries.UpdateIssueFromExternalSync(ctx, db.UpdateIssueFromExternalSyncParams{
+		Title:       title,
+		Description: util.StrToText(description),
+		Status:      status,
+		Priority:    priority,
+		Metadata:    metadataBytes,
+		ID:          res.Issue.ID,
+		WorkspaceID: res.Issue.WorkspaceID,
+	})
+	if err != nil {
+		return BugSyncItemResult{}, fmt.Errorf("stamp external bug metadata: %w", err)
+	}
+	i.publishIssueMetadataChanged(updated, "external_bug_sync")
+	i.notifyAssignee(ctx, updated, assigneeID)
+	return BugSyncItemResult{
+		Issue:          updated,
+		Provider:       provider,
+		SourceRecordID: recordID,
+		ExternalKey:    item.ExternalKey,
+		BugID:          item.BugID,
+	}, nil
+}
+
 func (i *Importer) notifyAssignee(ctx context.Context, issue db.Issue, assigneeID pgtype.UUID) {
 	if !assigneeID.Valid {
 		return
@@ -423,6 +753,467 @@ func (i *Importer) publishInboxNew(item db.InboxItem, issueStatus string) {
 		ActorID:     actorID,
 		Payload:     map[string]any{"item": resp},
 	})
+}
+
+func (i *Importer) publishExternalIssueUpdated(ctx context.Context, prev db.Issue, updated db.Issue, source string) {
+	if i.Bus == nil {
+		return
+	}
+	issuePayload := any(externalIssueEventPayload(updated))
+	if i.BroadcastPayload != nil {
+		payload := i.BroadcastPayload(ctx, updated, nil)
+		if issue, ok := payload["issue"]; ok {
+			issuePayload = issue
+		}
+	}
+	i.Bus.Publish(events.Event{
+		Type:        protocol.EventIssueUpdated,
+		WorkspaceID: util.UUIDToString(updated.WorkspaceID),
+		ActorType:   "system",
+		ActorID:     "",
+		Payload: map[string]any{
+			"issue":               issuePayload,
+			"assignee_changed":    false,
+			"status_changed":      prev.Status != updated.Status,
+			"priority_changed":    prev.Priority != updated.Priority,
+			"project_changed":     false,
+			"description_changed": textString(prev.Description) != textString(updated.Description),
+			"title_changed":       prev.Title != updated.Title,
+			"prev_title":          prev.Title,
+			"prev_assignee_type":  textString(prev.AssigneeType),
+			"prev_assignee_id":    util.UUIDToPtr(prev.AssigneeID),
+			"prev_status":         prev.Status,
+			"prev_priority":       prev.Priority,
+			"prev_description":    util.TextToPtr(prev.Description),
+			"creator_type":        prev.CreatorType,
+			"creator_id":          util.UUIDToString(prev.CreatorID),
+			"source":              source,
+		},
+	})
+}
+
+func (i *Importer) publishIssueMetadataChanged(issue db.Issue, source string) {
+	if i.Bus == nil {
+		return
+	}
+	i.Bus.Publish(events.Event{
+		Type:        protocol.EventIssueMetadataChanged,
+		WorkspaceID: util.UUIDToString(issue.WorkspaceID),
+		ActorType:   "system",
+		ActorID:     "",
+		Payload: map[string]any{
+			"issue_id": util.UUIDToString(issue.ID),
+			"metadata": externalIssueMetadataMap(issue.Metadata),
+			"source":   source,
+		},
+	})
+}
+
+func externalIssueEventPayload(issue db.Issue) map[string]any {
+	return map[string]any{
+		"id":              util.UUIDToString(issue.ID),
+		"workspace_id":    util.UUIDToString(issue.WorkspaceID),
+		"number":          issue.Number,
+		"title":           issue.Title,
+		"description":     util.TextToPtr(issue.Description),
+		"status":          issue.Status,
+		"priority":        issue.Priority,
+		"assignee_type":   util.TextToPtr(issue.AssigneeType),
+		"assignee_id":     util.UUIDToPtr(issue.AssigneeID),
+		"creator_type":    issue.CreatorType,
+		"creator_id":      util.UUIDToString(issue.CreatorID),
+		"parent_issue_id": util.UUIDToPtr(issue.ParentIssueID),
+		"project_id":      util.UUIDToPtr(issue.ProjectID),
+		"position":        issue.Position,
+		"metadata":        externalIssueMetadataMap(issue.Metadata),
+	}
+}
+
+func externalIssueMetadataMap(raw []byte) map[string]any {
+	if len(raw) == 0 {
+		return map[string]any{}
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil || out == nil {
+		return map[string]any{}
+	}
+	return out
+}
+
+func bugProvider(payload BugSyncPayload) string {
+	return firstNonEmpty(payload.Source, defaultBugProvider)
+}
+
+func bugRecordID(item BugSyncItem) string {
+	if v := strings.TrimSpace(item.ExternalKey); v != "" {
+		return v
+	}
+	entityType := firstNonEmpty(item.EntityType, "version_bug")
+	if item.BugID != 0 {
+		return fmt.Sprintf("%s:%d", entityType, item.BugID)
+	}
+	return ""
+}
+
+func bugSyncEventSupported(event string) bool {
+	switch strings.ToLower(strings.TrimSpace(event)) {
+	case "", "upsert", "create", "created", "update", "updated", "change", "changed":
+		return true
+	default:
+		return false
+	}
+}
+
+func bugIssueTitle(item BugSyncItem) string {
+	base := strings.TrimSpace(item.Title)
+	bugID := item.BugID
+	if bugID == 0 {
+		bugID = item.BugDetail.BugID
+	}
+	if base == "" && bugID != 0 {
+		base = "Syndra Bug"
+	}
+	if base == "" {
+		return ""
+	}
+
+	var prefixes []string
+	if bugID != 0 {
+		prefixes = append(prefixes, fmt.Sprintf("【Bug#%d】", bugID))
+	}
+	if versionName := strings.TrimSpace(firstNonEmpty(item.VersionName, item.BugDetail.Version.VersionName)); versionName != "" {
+		prefixes = append(prefixes, "【"+versionName+"】")
+	}
+	return strings.Join(prefixes, "") + base
+}
+
+func bugIssueDescription(item BugSyncItem) string {
+	if description := cleanBugHTMLText(item.Description); description != "" {
+		return description
+	}
+	var parts []string
+	if item.VersionName != "" {
+		parts = append(parts, "版本："+strings.TrimSpace(item.VersionName))
+	}
+	if item.BugLevel != "" {
+		parts = append(parts, "严重程度："+strings.TrimSpace(item.BugLevel))
+	}
+	if item.Priority != "" {
+		parts = append(parts, "优先级："+strings.TrimSpace(item.Priority))
+	}
+	if firstNonEmpty(item.StatusName, item.Status) != "" {
+		parts = append(parts, "状态："+firstNonEmpty(item.StatusName, item.Status))
+	}
+	if name := bugPersonName(item.Assignee); name != "" {
+		parts = append(parts, "指派人："+name)
+	}
+	if name := bugPersonName(item.Solver); name != "" {
+		parts = append(parts, "解决人："+name)
+	}
+	if item.SourceURL != "" {
+		parts = append(parts, "Syndra："+strings.TrimSpace(item.SourceURL))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func cleanBugHTMLText(input string) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+	if !strings.Contains(input, "<") {
+		return normalizeBugText(input)
+	}
+	text := bugBreakTagRE.ReplaceAllString(input, "\n")
+	text = bugBlockOpenTagRE.ReplaceAllString(text, "\n")
+	text = bugListOpenTagRE.ReplaceAllString(text, "\n- ")
+	text = bugAnyTagRE.ReplaceAllString(text, "")
+	return normalizeBugText(text)
+}
+
+func normalizeBugText(input string) string {
+	input = htmlstd.UnescapeString(strings.ReplaceAll(input, "\r\n", "\n"))
+	input = strings.ReplaceAll(input, "\r", "\n")
+	lines := strings.Split(input, "\n")
+	out := make([]string, 0, len(lines))
+	blank := false
+	for _, line := range lines {
+		line = strings.Join(strings.Fields(line), " ")
+		if line == "" {
+			if len(out) > 0 && !blank {
+				out = append(out, "")
+				blank = true
+			}
+			continue
+		}
+		out = append(out, line)
+		blank = false
+	}
+	for len(out) > 0 && out[len(out)-1] == "" {
+		out = out[:len(out)-1]
+	}
+	return strings.Join(out, "\n")
+}
+
+func bugIssueStatus(item BugSyncItem) string {
+	combined := strings.ToLower(strings.Join([]string{item.Status, item.StatusName}, " "))
+	switch {
+	case strings.Contains(combined, "cancel") || strings.Contains(combined, "取消"):
+		return "cancelled"
+	case strings.Contains(combined, "block") || strings.Contains(combined, "阻塞"):
+		return "blocked"
+	case strings.Contains(combined, "review") || strings.Contains(combined, "验收") || strings.Contains(combined, "待验证"):
+		return "in_review"
+	case strings.Contains(combined, "progress") || strings.Contains(combined, "处理中") ||
+		strings.Contains(combined, "修复中") || strings.Contains(combined, "解决中") ||
+		strings.Contains(combined, "进行"):
+		return "in_progress"
+	case strings.Contains(combined, "resolved") || strings.Contains(combined, "fixed") ||
+		strings.Contains(combined, "closed") || strings.Contains(combined, "done") ||
+		strings.Contains(combined, "已解决") || strings.Contains(combined, "关闭") ||
+		strings.Contains(combined, "完成"):
+		return "done"
+	case strings.Contains(combined, "active") || strings.Contains(combined, "open") || strings.Contains(combined, "激活"):
+		return "todo"
+	default:
+		return defaultBugStatus
+	}
+}
+
+func bugIssuePriority(item BugSyncItem) string {
+	level := strings.ToUpper(strings.TrimSpace(item.BugLevel))
+	switch level {
+	case "P0", "P1":
+		return "urgent"
+	case "P2":
+		return "high"
+	case "P3":
+		return "medium"
+	case "P4", "P5":
+		return "low"
+	}
+	priority := strings.ToLower(strings.TrimSpace(item.Priority))
+	switch {
+	case strings.Contains(priority, "urgent") || strings.Contains(priority, "blocker") || strings.Contains(priority, "紧急"):
+		return "urgent"
+	case strings.Contains(priority, "high") || strings.Contains(priority, "高"):
+		return "high"
+	case strings.Contains(priority, "medium") || strings.Contains(priority, "一般") || strings.Contains(priority, "中"):
+		return "medium"
+	case strings.Contains(priority, "low") || strings.Contains(priority, "低"):
+		return "low"
+	default:
+		return defaultPriority
+	}
+}
+
+func bugIssueMetadata(payload BugSyncPayload, item BugSyncItem, provider, recordID string) map[string]any {
+	b := bugMetadataBuilder{out: map[string]any{}}
+	b.add("external_source", provider)
+	b.add("external_provider", provider)
+	b.add("external_key", recordID)
+	b.add("external_url", firstNonEmpty(item.SourceURL, item.BugDetail.SourceURL))
+	b.add("sync_schema_version", payload.SchemaVersion)
+	b.add("sync_event_type", payload.EventType)
+	b.add("sync_event_id", payload.EventID)
+	b.add("sync_scene", payload.Scene)
+	b.add("sync_source_env", payload.SourceEnv)
+	b.add("sync_sent_at", payload.SentAt)
+	b.add("bug_id", item.BugID)
+	b.add("bug_external_key", item.ExternalKey)
+	b.add("bug_entity_type", item.EntityType)
+	b.add("bug_event", item.Event)
+	b.add("bug_version_id", item.VersionID)
+	b.add("bug_version_name", item.VersionName)
+	b.add("bug_demand_name", item.DemandName)
+	b.add("bug_role", item.Role)
+	b.add("bug_level", item.BugLevel)
+	b.add("bug_type_id", item.BugTypeID)
+	b.add("bug_type", item.BugType)
+	b.add("bug_priority", item.Priority)
+	b.add("bug_status", item.Status)
+	b.add("bug_status_name", item.StatusName)
+	b.add("bug_resolve_solution", item.ResolveSolution)
+	b.add("bug_resolve_solution_name", item.ResolveSolutionName)
+	b.add("bug_created_at", item.CreatedAt)
+	b.add("bug_updated_at", item.UpdatedAt)
+	b.add("bug_labels", strings.Join(trimNonEmptyStrings(item.Labels), ","))
+	b.add("bug_module_id", item.Module.ModuleID)
+	b.add("bug_module_name", item.Module.ModuleName)
+	b.add("bug_attachment_count", bugMediaCount(item.Attachments, item.BugDetail.Attachments))
+	b.add("bug_video_count", bugMediaCount(item.Videos, item.BugDetail.Videos))
+	b.add("bug_zentao_url", item.BugDetail.BugURL)
+	b.add("bug_deadline", item.BugDetail.Deadline)
+	b.add("bug_solve_time", item.BugDetail.BugSolveTime)
+	b.add("bug_reopen_count", item.BugDetail.ReopenCount)
+	b.add("bug_version_type", item.BugDetail.Version.VersionType)
+	b.add("bug_version_status", item.BugDetail.Version.VersionStatus)
+	b.addPerson("bug_owner", item.Owner)
+	b.addPerson("bug_creator", item.Creator)
+	b.addPerson("bug_assignee", item.Assignee)
+	b.addPerson("bug_solver", item.Solver)
+	for key, value := range item.Metadata {
+		b.add(sanitizeBugMetadataKey(key), value)
+	}
+	return b.out
+}
+
+func bugMediaCount(primary, detail []BugSyncMedia) int {
+	if len(primary) > 0 {
+		return len(primary)
+	}
+	return len(detail)
+}
+
+type bugMetadataBuilder struct {
+	out map[string]any
+}
+
+func (b *bugMetadataBuilder) addPerson(prefix string, person BugSyncPerson) {
+	if person.MateID != nil {
+		b.add(prefix+"_mate_id", *person.MateID)
+	}
+	b.add(prefix+"_name", bugPersonName(person))
+	if person.DeptName != nil {
+		b.add(prefix+"_dept_name", *person.DeptName)
+	}
+}
+
+func (b *bugMetadataBuilder) add(key string, value any) {
+	if len(b.out) >= maxBugMetadataKeys {
+		return
+	}
+	key = sanitizeBugMetadataKey(key)
+	if key == "" {
+		return
+	}
+	value, ok := bugPrimitiveMetadataValue(value)
+	if !ok {
+		return
+	}
+	if s, ok := value.(string); ok {
+		s = truncateBugMetadataString(strings.TrimSpace(s))
+		if s == "" {
+			return
+		}
+		value = s
+	}
+	b.out[key] = value
+}
+
+func bugPrimitiveMetadataValue(value any) (any, bool) {
+	switch v := value.(type) {
+	case nil:
+		return nil, false
+	case string:
+		return v, true
+	case bool:
+		return v, true
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		if v == 0 {
+			return nil, false
+		}
+		return v, true
+	case int64:
+		if v == 0 {
+			return nil, false
+		}
+		return v, true
+	case int32:
+		if v == 0 {
+			return nil, false
+		}
+		return v, true
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			if i == 0 {
+				return nil, false
+			}
+			return i, true
+		}
+		if f, err := v.Float64(); err == nil {
+			return f, true
+		}
+		return v.String(), true
+	default:
+		return nil, false
+	}
+}
+
+func sanitizeBugMetadataKey(key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range key {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '_' || r == '.' || r == '-' {
+			b.WriteRune(r)
+		} else if unicode.IsSpace(r) {
+			b.WriteByte('_')
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "_.-")
+	if out == "" {
+		return ""
+	}
+	first := out[0]
+	if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
+		out = "external_" + out
+	}
+	if len(out) > 64 {
+		out = out[:64]
+	}
+	return out
+}
+
+func truncateBugMetadataString(s string) string {
+	if len(s) <= maxBugMetadataStringLen {
+		return s
+	}
+	count := 0
+	for idx := range s {
+		if count == maxBugMetadataStringLen {
+			return strings.TrimSpace(s[:idx]) + "..."
+		}
+		count++
+	}
+	return s
+}
+
+func bugPersonName(person BugSyncPerson) string {
+	if person.Name == nil {
+		return ""
+	}
+	return strings.TrimSpace(*person.Name)
+}
+
+func bugPersonHasValue(person BugSyncPerson) bool {
+	return person.MateID != nil || bugPersonName(person) != "" || (person.DeptName != nil && strings.TrimSpace(*person.DeptName) != "")
+}
+
+func bugAssigneePerson(item BugSyncItem) BugSyncPerson {
+	if bugPersonHasValue(item.Assignee) {
+		return item.Assignee
+	}
+	return item.BugDetail.Assignee
+}
+
+func trimNonEmptyStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if v := strings.TrimSpace(value); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func (i *Importer) warn(msg string, args ...any) {
@@ -803,13 +1594,7 @@ func (i *Importer) resolveMemberByExternalUserID(ctx context.Context, workspaceI
 	if externalUserID == "" {
 		return db.Member{}, ErrMissingDefaultAssignee
 	}
-	member, err := i.Queries.GetWorkspaceMemberByExternalIdentity(ctx, db.GetWorkspaceMemberByExternalIdentityParams{
-		WorkspaceID:    workspaceID,
-		Provider:       enterpriseLark.ProviderName,
-		ExternalUserID: externalUserID,
-		OpenID:         externalUserID,
-		UnionID:        externalUserID,
-	})
+	member, err := i.lookupMemberByExternalIdentity(ctx, workspaceID, externalUserID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return db.Member{}, ErrDefaultAssigneeNotMember
@@ -817,6 +1602,67 @@ func (i *Importer) resolveMemberByExternalUserID(ctx context.Context, workspaceI
 		return db.Member{}, err
 	}
 	return member, nil
+}
+
+func (i *Importer) resolveBugAssigneeMember(ctx context.Context, workspaceID pgtype.UUID, item BugSyncItem, defaultAssignee db.Member) (db.Member, error) {
+	person := bugAssigneePerson(item)
+	if name := bugPersonName(person); name != "" {
+		member, ok, err := i.lookupUniqueMemberByName(ctx, workspaceID, name)
+		if err != nil {
+			return db.Member{}, err
+		}
+		if ok {
+			return member, nil
+		}
+	}
+	return defaultAssignee, nil
+}
+
+func (i *Importer) lookupMemberByExternalIdentity(ctx context.Context, workspaceID pgtype.UUID, externalUserID string) (db.Member, error) {
+	externalUserID = strings.TrimSpace(externalUserID)
+	if externalUserID == "" {
+		return db.Member{}, pgx.ErrNoRows
+	}
+	return i.Queries.GetWorkspaceMemberByExternalIdentity(ctx, db.GetWorkspaceMemberByExternalIdentityParams{
+		WorkspaceID:    workspaceID,
+		Provider:       enterpriseLark.ProviderName,
+		ExternalUserID: externalUserID,
+		OpenID:         externalUserID,
+		UnionID:        externalUserID,
+	})
+}
+
+func (i *Importer) lookupUniqueMemberByName(ctx context.Context, workspaceID pgtype.UUID, name string) (db.Member, bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return db.Member{}, false, nil
+	}
+	members, err := i.Queries.ListMembersWithUser(ctx, workspaceID)
+	if err != nil {
+		return db.Member{}, false, err
+	}
+	var matched db.Member
+	count := 0
+	for _, member := range members {
+		if strings.TrimSpace(member.UserName) != name {
+			continue
+		}
+		count++
+		if count > 1 {
+			return db.Member{}, false, nil
+		}
+		matched = db.Member{
+			ID:          member.ID,
+			WorkspaceID: member.WorkspaceID,
+			UserID:      member.UserID,
+			Role:        member.Role,
+			CreatedAt:   member.CreatedAt,
+		}
+	}
+	if count == 0 {
+		return db.Member{}, false, nil
+	}
+	return matched, true, nil
 }
 
 func (i *Importer) createAttachments(ctx context.Context, rec normalizedRecord, uploaderID pgtype.UUID) ([]pgtype.UUID, []db.Attachment, []AttachmentError) {
@@ -1258,6 +2104,35 @@ func DecodeRequest(body io.Reader) (Request, error) {
 		}
 	}
 	return req, nil
+}
+
+func DecodeBugSyncRequest(body io.Reader) (BugSyncPayload, error) {
+	var payload BugSyncPayload
+	dec := json.NewDecoder(body)
+	dec.UseNumber()
+	var raw map[string]any
+	if err := dec.Decode(&raw); err != nil {
+		return payload, err
+	}
+	source := any(raw)
+	if _, hasItems := raw["items"]; !hasItems {
+		if nested, ok := raw["payload"]; ok {
+			source = nested
+		}
+		if data, ok := raw["data"].(map[string]any); ok {
+			if nested, ok := data["payload"]; ok {
+				source = nested
+			}
+		}
+	}
+	buf := &bytes.Buffer{}
+	if err := json.NewEncoder(buf).Encode(source); err != nil {
+		return payload, err
+	}
+	if err := json.NewDecoder(buf).Decode(&payload); err != nil {
+		return payload, err
+	}
+	return payload, nil
 }
 
 func normalizeNumbers(in map[string]any) map[string]any {
