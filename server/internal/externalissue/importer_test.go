@@ -133,7 +133,10 @@ func TestImportCreatesBacklogIssueAndIsIdempotent(t *testing.T) {
 			"版本类型": "小需求",
 			"版本":   "MUL-100",
 			"需求名称": "同步飞书需求",
-			"备注":   "第一版备注",
+			"产品经理": []any{
+				map[string]any{"id": "ou_pm_1", "name": "王产品"},
+			},
+			"备注": "第一版备注",
 			"附件": []any{
 				map[string]any{
 					"name": "spec.txt",
@@ -163,6 +166,7 @@ func TestImportCreatesBacklogIssueAndIsIdempotent(t *testing.T) {
 		t.Fatalf("assignee = (%q, %s), want member %s", first.Issue.AssigneeType.String, util.UUIDToString(first.Issue.AssigneeID), util.UUIDToString(fx.User.ID))
 	}
 	if !strings.Contains(first.Issue.Description.String, "需求名称：同步飞书需求") ||
+		!strings.Contains(first.Issue.Description.String, "产品经理：王产品") ||
 		!strings.Contains(first.Issue.Description.String, "备注：第一版备注") ||
 		!strings.Contains(first.Issue.Description.String, "来源：https://example.feishu.cn/base/base-token?table=table-id") {
 		t.Fatalf("description did not include merged fields and source: %q", first.Issue.Description.String)
@@ -584,6 +588,7 @@ func TestDecodeRequestSupportsRecordEnvelopeAndNumericFields(t *testing.T) {
 				"版本类型": "小需求",
 				"版本": 20260609,
 				"需求名称": [{"text": "名称"}],
+				"产品经理": [{"id": "ou_pm_1", "name": "王产品"}, {"id": "ou_pm_2", "name": "李产品"}],
 				"附件": [{"file_token": "token-a", "name": "a.txt"}]
 			}
 		}
@@ -603,6 +608,9 @@ func TestDecodeRequestSupportsRecordEnvelopeAndNumericFields(t *testing.T) {
 	}
 	if rec.Name != "名称" {
 		t.Fatalf("name = %q", rec.Name)
+	}
+	if rec.ProductManager != "王产品, 李产品" {
+		t.Fatalf("product manager = %q", rec.ProductManager)
 	}
 	if len(rec.Attachments) != 1 || rec.Attachments[0].FileToken != "token-a" {
 		t.Fatalf("attachments = %#v", rec.Attachments)

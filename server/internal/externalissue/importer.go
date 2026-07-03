@@ -264,11 +264,12 @@ type BugSyncVersion struct {
 }
 
 type FieldMapping struct {
-	VersionType string `json:"version_type,omitempty"`
-	Version     string `json:"version,omitempty"`
-	Name        string `json:"name,omitempty"`
-	Notes       string `json:"notes,omitempty"`
-	Attachments string `json:"attachments,omitempty"`
+	VersionType    string `json:"version_type,omitempty"`
+	Version        string `json:"version,omitempty"`
+	Name           string `json:"name,omitempty"`
+	ProductManager string `json:"product_manager,omitempty"`
+	Notes          string `json:"notes,omitempty"`
+	Attachments    string `json:"attachments,omitempty"`
 }
 
 type Result struct {
@@ -333,6 +334,7 @@ type normalizedRecord struct {
 	VersionType    string
 	Title          string
 	Name           string
+	ProductManager string
 	Notes          string
 	Description    string
 	AssigneeUserID string
@@ -1268,6 +1270,7 @@ func (i *Importer) normalize(req Request) (normalizedRecord, error) {
 		return normalizedRecord{}, ErrMissingTitle
 	}
 	name := textValue(fields[m.Name])
+	productManager := textValue(fields[m.ProductManager])
 	notes := textValue(fields[m.Notes])
 
 	rec := normalizedRecord{
@@ -1281,8 +1284,9 @@ func (i *Importer) normalize(req Request) (normalizedRecord, error) {
 		VersionType:    textValue(fields[m.VersionType]),
 		Title:          title,
 		Name:           name,
+		ProductManager: productManager,
 		Notes:          notes,
-		Description:    buildDescription(name, notes, req.RecordURL),
+		Description:    buildDescription(name, productManager, notes, req.RecordURL),
 		AssigneeUserID: strings.TrimSpace(req.AssigneeUserID),
 		Attachments:    attachmentSources(fields[m.Attachments]),
 		RawFields:      fields,
@@ -1306,6 +1310,9 @@ func (m FieldMapping) withDefaults() FieldMapping {
 	}
 	if strings.TrimSpace(m.Name) == "" {
 		m.Name = "需求名称"
+	}
+	if strings.TrimSpace(m.ProductManager) == "" {
+		m.ProductManager = "产品经理"
 	}
 	if strings.TrimSpace(m.Notes) == "" {
 		m.Notes = "备注"
@@ -1519,10 +1526,13 @@ func recordFieldsAndID(record json.RawMessage) (map[string]any, string) {
 	return fields, recordID
 }
 
-func buildDescription(name, notes, recordURL string) string {
+func buildDescription(name, productManager, notes, recordURL string) string {
 	var parts []string
 	if strings.TrimSpace(name) != "" {
 		parts = append(parts, "需求名称："+strings.TrimSpace(name))
+	}
+	if strings.TrimSpace(productManager) != "" {
+		parts = append(parts, "产品经理："+strings.TrimSpace(productManager))
 	}
 	if strings.TrimSpace(notes) != "" {
 		parts = append(parts, "备注："+strings.TrimSpace(notes))

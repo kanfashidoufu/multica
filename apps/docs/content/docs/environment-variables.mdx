@@ -266,7 +266,7 @@ For Feishu Base automation, configure the HTTP step Params as:
 | `table_id` | Table id from Feishu automation |
 | `record_id` | Record id from Feishu automation |
 
-Multica uses `LARK_APP_ID` and `LARK_APP_SECRET` from the Lark login app to fetch that one Base record, then imports records whose `版本类型` is `小需求`. Attachments are read from Feishu Base attachment field values (`file_token`, `name`, `size`, `type`, `url`, `tmp_url`) and uploaded as issue attachments.
+Multica uses `LARK_APP_ID` and `LARK_APP_SECRET` from the Lark login app to fetch that one Base record, then imports records whose `版本类型` is `小需求`. The issue description includes `需求名称`, `产品经理` (from the Feishu person field names), `备注`, and the source URL. Attachments are read from Feishu Base attachment field values (`file_token`, `name`, `size`, `type`, `url`, `tmp_url`) and uploaded as issue attachments.
 
 Imported issues are created in `backlog` and use `origin_type=external_issue` for idempotency, so retries for the same external record return the existing issue instead of creating duplicates.
 
