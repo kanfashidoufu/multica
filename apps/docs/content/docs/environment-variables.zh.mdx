@@ -270,7 +270,7 @@ API 返回的 `download_url` 在未配置 CloudFront 签名时会指向 `GET /ap
 | `table_id` | 飞书自动化中的表 ID |
 | `record_id` | 飞书自动化中的记录 ID |
 
-Multica 会使用飞书登录应用的 `LARK_APP_ID` 和 `LARK_APP_SECRET` 回查这条多维表格记录，只导入 `版本类型` 为 `小需求` 的记录。附件会按飞书多维表格附件字段里的 `file_token`、`name`、`size`、`type`、`url`、`tmp_url` 解析后上传为 issue 附件。
+Multica 会使用飞书登录应用的 `LARK_APP_ID` 和 `LARK_APP_SECRET` 回查这条多维表格记录，只导入 `版本类型` 为 `小需求` 的记录。issue 内容会包含 `需求名称`、`产品经理`、`备注` 和来源链接。附件会按飞书多维表格附件字段里的 `file_token`、`name`、`size`、`type`、`url`、`tmp_url` 解析后上传为 issue 附件。
 
 导入的 issue 默认进入 `backlog`（待规划），并使用 `origin_type=external_issue` 做幂等；同一外部记录重试时会返回已存在的 issue，不会重复创建。
 

@@ -133,7 +133,10 @@ func TestImportCreatesBacklogIssueAndIsIdempotent(t *testing.T) {
 			"版本类型": "小需求",
 			"版本":   "MUL-100",
 			"需求名称": "同步飞书需求",
-			"备注":   "第一版备注",
+			"产品经理": []any{
+				map[string]any{"id": "ou_pm_1", "name": "周璇"},
+			},
+			"备注": "第一版备注",
 			"附件": []any{
 				map[string]any{
 					"name": "spec.txt",
@@ -163,6 +166,7 @@ func TestImportCreatesBacklogIssueAndIsIdempotent(t *testing.T) {
 		t.Fatalf("assignee = (%q, %s), want member %s", first.Issue.AssigneeType.String, util.UUIDToString(first.Issue.AssigneeID), util.UUIDToString(fx.User.ID))
 	}
 	if !strings.Contains(first.Issue.Description.String, "需求名称：同步飞书需求") ||
+		!strings.Contains(first.Issue.Description.String, "产品经理：周璇") ||
 		!strings.Contains(first.Issue.Description.String, "备注：第一版备注") ||
 		!strings.Contains(first.Issue.Description.String, "来源：https://example.feishu.cn/base/base-token?table=table-id") {
 		t.Fatalf("description did not include merged fields and source: %q", first.Issue.Description.String)
@@ -195,6 +199,88 @@ func TestImportCreatesBacklogIssueAndIsIdempotent(t *testing.T) {
 		t.Fatalf("second issue id = %s, want %s", util.UUIDToString(second.Issue.ID), util.UUIDToString(first.Issue.ID))
 	}
 	assertAssigneeInboxCount(t, ctx, pool, first.Issue.ID, fx.User.ID, 1)
+}
+
+func TestImportUpdatesExistingIssueDescriptionFromRecord(t *testing.T) {
+	ctx := context.Background()
+	pool := openTestPool(t, ctx)
+	q := db.New(pool)
+	fx := createImporterFixture(t, ctx, pool, q)
+
+	importer := &Importer{
+		Queries: q,
+		IssueService: service.NewIssueService(
+			q,
+			pool,
+			events.New(),
+			analytics.NoopClient{},
+			nil,
+		),
+		Bus: events.New(),
+		Config: Config{
+			WebhookToken:                  "test-token",
+			DefaultAssigneeExternalUserID: fx.ExternalUserID,
+		},
+	}
+
+	req := Request{
+		Provider:    "lark_base",
+		WorkspaceID: util.UUIDToString(fx.Workspace.ID),
+		BaseToken:   "base-token",
+		TableID:     "table-id",
+		RecordID:    "record-existing-product-manager",
+		RecordURL:   "https://example.feishu.cn/base/base-token?table=table-id",
+		Fields: map[string]any{
+			"版本类型": "小需求",
+			"版本":   "MUL-105",
+			"需求名称": "老记录补产品经理",
+			"备注":   "第一版备注",
+		},
+	}
+
+	first, err := importer.Import(ctx, req)
+	if err != nil {
+		t.Fatalf("Import first: %v", err)
+	}
+	if strings.Contains(first.Issue.Description.String, "产品经理：") {
+		t.Fatalf("first description unexpectedly included product manager: %q", first.Issue.Description.String)
+	}
+
+	changed, err := q.UpdateIssue(ctx, db.UpdateIssueParams{
+		ID:            first.Issue.ID,
+		Status:        pgtype.Text{String: "in_progress", Valid: true},
+		Priority:      pgtype.Text{String: "high", Valid: true},
+		AssigneeType:  first.Issue.AssigneeType,
+		AssigneeID:    first.Issue.AssigneeID,
+		StartDate:     first.Issue.StartDate,
+		DueDate:       first.Issue.DueDate,
+		ParentIssueID: first.Issue.ParentIssueID,
+		ProjectID:     first.Issue.ProjectID,
+		Stage:         first.Issue.Stage,
+	})
+	if err != nil {
+		t.Fatalf("mark existing issue changed: %v", err)
+	}
+
+	req.Fields["产品经理"] = []any{
+		map[string]any{"id": "ou_pm_1", "name": "周璇"},
+	}
+	second, err := importer.Import(ctx, req)
+	if err != nil {
+		t.Fatalf("Import second: %v", err)
+	}
+	if !second.Existing {
+		t.Fatalf("second import did not report existing")
+	}
+	if second.Issue.ID != first.Issue.ID {
+		t.Fatalf("second issue id = %s, want %s", util.UUIDToString(second.Issue.ID), util.UUIDToString(first.Issue.ID))
+	}
+	if !strings.Contains(second.Issue.Description.String, "产品经理：周璇") {
+		t.Fatalf("description did not include product manager: %q", second.Issue.Description.String)
+	}
+	if second.Issue.Status != changed.Status || second.Issue.Priority != changed.Priority {
+		t.Fatalf("status/priority changed on mirror update: got %q/%q want %q/%q", second.Issue.Status, second.Issue.Priority, changed.Status, changed.Priority)
+	}
 }
 
 func TestImportBugSyncCreatesAndUpdatesIssue(t *testing.T) {
@@ -584,6 +670,7 @@ func TestDecodeRequestSupportsRecordEnvelopeAndNumericFields(t *testing.T) {
 				"版本类型": "小需求",
 				"版本": 20260609,
 				"需求名称": [{"text": "名称"}],
+				"产品经理": [{"id": "ou_pm_1", "name": "周璇"}],
 				"附件": [{"file_token": "token-a", "name": "a.txt"}]
 			}
 		}
@@ -603,6 +690,9 @@ func TestDecodeRequestSupportsRecordEnvelopeAndNumericFields(t *testing.T) {
 	}
 	if rec.Name != "名称" {
 		t.Fatalf("name = %q", rec.Name)
+	}
+	if rec.ProductManager != "周璇" {
+		t.Fatalf("product manager = %q", rec.ProductManager)
 	}
 	if len(rec.Attachments) != 1 || rec.Attachments[0].FileToken != "token-a" {
 		t.Fatalf("attachments = %#v", rec.Attachments)

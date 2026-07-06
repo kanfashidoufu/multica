@@ -247,7 +247,7 @@ Feishu Base automation の HTTP step Params は次のように設定できます
 | `table_id` | Feishu automation の table id |
 | `record_id` | Feishu automation の record id |
 
-Multica は Lark login app の `LARK_APP_ID` と `LARK_APP_SECRET` を使って該当 Base record を取得し、`版本类型` が `小需求` の record だけを import します。添付は Feishu Base attachment field の `file_token`、`name`、`size`、`type`、`url`、`tmp_url` から読み取り、issue attachment としてアップロードします。
+Multica は Lark login app の `LARK_APP_ID` と `LARK_APP_SECRET` を使って該当 Base record を取得し、`版本类型` が `小需求` の record だけを import します。issue description には `需求名称`、`产品经理`、`备注`、source URL が入ります。添付は Feishu Base attachment field の `file_token`、`name`、`size`、`type`、`url`、`tmp_url` から読み取り、issue attachment としてアップロードします。
 
 インポートされた issue は `backlog` に作成され、`origin_type=external_issue` で冪等化されます。同じ外部 record の retry は重複作成せず、既存 issue を返します。
 

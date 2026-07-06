@@ -264,11 +264,12 @@ type BugSyncVersion struct {
 }
 
 type FieldMapping struct {
-	VersionType string `json:"version_type,omitempty"`
-	Version     string `json:"version,omitempty"`
-	Name        string `json:"name,omitempty"`
-	Notes       string `json:"notes,omitempty"`
-	Attachments string `json:"attachments,omitempty"`
+	VersionType    string `json:"version_type,omitempty"`
+	Version        string `json:"version,omitempty"`
+	Name           string `json:"name,omitempty"`
+	ProductManager string `json:"product_manager,omitempty"`
+	Notes          string `json:"notes,omitempty"`
+	Attachments    string `json:"attachments,omitempty"`
 }
 
 type Result struct {
@@ -333,6 +334,7 @@ type normalizedRecord struct {
 	VersionType    string
 	Title          string
 	Name           string
+	ProductManager string
 	Notes          string
 	Description    string
 	AssigneeUserID string
@@ -358,9 +360,39 @@ func (i *Importer) Import(ctx context.Context, req Request) (Result, error) {
 
 	rec, err := i.normalize(req)
 	if err != nil {
+		i.warn("external issue import: normalize failed",
+			"workspace_id", strings.TrimSpace(req.WorkspaceID),
+			"base_token", strings.TrimSpace(req.BaseToken),
+			"table_id", strings.TrimSpace(req.TableID),
+			"record_id", strings.TrimSpace(req.RecordID),
+			"error", err,
+		)
 		return Result{}, err
 	}
+	i.info("external issue import: record normalized",
+		"provider", rec.Provider,
+		"workspace_id", util.UUIDToString(rec.WorkspaceID),
+		"base_token", rec.BaseToken,
+		"table_id", rec.TableID,
+		"record_id", rec.RecordID,
+		"version_type", rec.VersionType,
+		"title", rec.Title,
+		"name", rec.Name,
+		"product_manager", rec.ProductManager,
+		"notes_present", strings.TrimSpace(rec.Notes) != "",
+		"attachment_count", len(rec.Attachments),
+	)
 	if !strings.EqualFold(strings.TrimSpace(rec.VersionType), targetType(req.TargetType)) {
+		i.info("external issue import: record ignored",
+			"provider", rec.Provider,
+			"workspace_id", util.UUIDToString(rec.WorkspaceID),
+			"base_token", rec.BaseToken,
+			"table_id", rec.TableID,
+			"record_id", rec.RecordID,
+			"version_type", rec.VersionType,
+			"target_type", targetType(req.TargetType),
+			"reason", "version_type_not_target",
+		)
 		return Result{
 			Ignored:        true,
 			Reason:         "version_type_not_target",
@@ -371,10 +403,22 @@ func (i *Importer) Import(ctx context.Context, req Request) (Result, error) {
 
 	defaultUserID := firstNonEmpty(strings.TrimSpace(req.AssigneeUserID), cfg.DefaultAssigneeExternalUserID)
 	if defaultUserID == "" {
+		i.warn("external issue import: default assignee missing",
+			"provider", rec.Provider,
+			"workspace_id", util.UUIDToString(rec.WorkspaceID),
+			"record_id", rec.RecordID,
+		)
 		return Result{}, ErrMissingDefaultAssignee
 	}
 	assignee, err := i.resolveMemberByExternalUserID(ctx, rec.WorkspaceID, defaultUserID)
 	if err != nil {
+		i.warn("external issue import: assignee resolve failed",
+			"provider", rec.Provider,
+			"workspace_id", util.UUIDToString(rec.WorkspaceID),
+			"record_id", rec.RecordID,
+			"assignee_user_id", defaultUserID,
+			"error", err,
+		)
 		return Result{}, err
 	}
 
@@ -389,8 +433,22 @@ func (i *Importer) Import(ctx context.Context, req Request) (Result, error) {
 			IssueID:     existing.ID,
 			WorkspaceID: existing.WorkspaceID,
 		})
+		i.info("external issue import: existing issue matched",
+			"provider", rec.Provider,
+			"workspace_id", util.UUIDToString(rec.WorkspaceID),
+			"base_token", rec.BaseToken,
+			"table_id", rec.TableID,
+			"record_id", rec.RecordID,
+			"issue_id", util.UUIDToString(existing.ID),
+			"issue_number", existing.Number,
+			"attachment_count", len(attachments),
+		)
+		updated, updateErr := i.updateExistingExternalIssue(ctx, existing, rec, attachments)
+		if updateErr != nil {
+			return Result{}, updateErr
+		}
 		return Result{
-			Issue:          existing,
+			Issue:          updated,
 			Existing:       true,
 			Attachments:    attachments,
 			Provider:       rec.Provider,
@@ -402,6 +460,14 @@ func (i *Importer) Import(ctx context.Context, req Request) (Result, error) {
 	}
 
 	attachmentIDs, attachmentRows, attachmentErrors := i.createAttachments(ctx, rec, assignee.UserID)
+	i.info("external issue import: attachments processed",
+		"provider", rec.Provider,
+		"workspace_id", util.UUIDToString(rec.WorkspaceID),
+		"record_id", rec.RecordID,
+		"source_attachment_count", len(rec.Attachments),
+		"created_attachment_count", len(attachmentRows),
+		"attachment_error_count", len(attachmentErrors),
+	)
 	description := appendAttachmentMarkdown(rec.Description, attachmentRows)
 	createOpts := service.IssueCreateOpts{
 		ActorID:  util.UUIDToString(assignee.UserID),
@@ -440,8 +506,22 @@ func (i *Importer) Import(ctx context.Context, req Request) (Result, error) {
 				IssueID:     existing.ID,
 				WorkspaceID: existing.WorkspaceID,
 			})
+			i.info("external issue import: create raced existing issue",
+				"provider", rec.Provider,
+				"workspace_id", util.UUIDToString(rec.WorkspaceID),
+				"base_token", rec.BaseToken,
+				"table_id", rec.TableID,
+				"record_id", rec.RecordID,
+				"issue_id", util.UUIDToString(existing.ID),
+				"issue_number", existing.Number,
+				"attachment_error_count", len(attachmentErrors),
+			)
+			updated, updateErr := i.updateExistingExternalIssue(ctx, existing, rec, attachments)
+			if updateErr != nil {
+				return Result{}, updateErr
+			}
 			return Result{
-				Issue:            existing,
+				Issue:            updated,
 				Existing:         true,
 				Attachments:      attachments,
 				AttachmentErrors: attachmentErrors,
@@ -459,6 +539,18 @@ func (i *Importer) Import(ctx context.Context, req Request) (Result, error) {
 	if len(attachments) == 0 && len(attachmentRows) > 0 {
 		attachments = attachmentRows
 	}
+	i.info("external issue import: issue created",
+		"provider", rec.Provider,
+		"workspace_id", util.UUIDToString(rec.WorkspaceID),
+		"base_token", rec.BaseToken,
+		"table_id", rec.TableID,
+		"record_id", rec.RecordID,
+		"issue_id", util.UUIDToString(res.Issue.ID),
+		"issue_number", res.Issue.Number,
+		"product_manager", rec.ProductManager,
+		"attachment_count", len(attachments),
+		"attachment_error_count", len(attachmentErrors),
+	)
 	i.notifyAssignee(ctx, res.Issue, assignee.UserID)
 	return Result{
 		Issue:            res.Issue,
@@ -467,6 +559,52 @@ func (i *Importer) Import(ctx context.Context, req Request) (Result, error) {
 		Provider:         rec.Provider,
 		SourceRecordID:   rec.RecordID,
 	}, nil
+}
+
+func (i *Importer) updateExistingExternalIssue(ctx context.Context, existing db.Issue, rec normalizedRecord, attachments []db.Attachment) (db.Issue, error) {
+	description := appendAttachmentMarkdown(rec.Description, attachments)
+	if existing.Title == rec.Title && textString(existing.Description) == description {
+		i.info("external issue import: existing issue mirror unchanged",
+			"provider", rec.Provider,
+			"workspace_id", util.UUIDToString(rec.WorkspaceID),
+			"base_token", rec.BaseToken,
+			"table_id", rec.TableID,
+			"record_id", rec.RecordID,
+			"issue_id", util.UUIDToString(existing.ID),
+			"issue_number", existing.Number,
+			"product_manager", rec.ProductManager,
+		)
+		return existing, nil
+	}
+	updated, err := i.Queries.UpdateIssue(ctx, db.UpdateIssueParams{
+		ID:            existing.ID,
+		Title:         pgtype.Text{String: rec.Title, Valid: true},
+		Description:   util.StrToText(description),
+		AssigneeType:  existing.AssigneeType,
+		AssigneeID:    existing.AssigneeID,
+		StartDate:     existing.StartDate,
+		DueDate:       existing.DueDate,
+		ParentIssueID: existing.ParentIssueID,
+		ProjectID:     existing.ProjectID,
+		Stage:         existing.Stage,
+	})
+	if err != nil {
+		return db.Issue{}, fmt.Errorf("update external issue mirror: %w", err)
+	}
+	i.info("external issue import: existing issue mirror updated",
+		"provider", rec.Provider,
+		"workspace_id", util.UUIDToString(rec.WorkspaceID),
+		"base_token", rec.BaseToken,
+		"table_id", rec.TableID,
+		"record_id", rec.RecordID,
+		"issue_id", util.UUIDToString(updated.ID),
+		"issue_number", updated.Number,
+		"product_manager", rec.ProductManager,
+		"title_changed", existing.Title != updated.Title,
+		"description_changed", textString(existing.Description) != textString(updated.Description),
+	)
+	i.publishExternalIssueUpdated(ctx, existing, updated, "external_issue_sync")
+	return updated, nil
 }
 
 func (i *Importer) ImportBugSync(ctx context.Context, req BugSyncRequest) (BugSyncResult, error) {
@@ -1224,6 +1362,14 @@ func (i *Importer) warn(msg string, args ...any) {
 	slog.Warn(msg, args...)
 }
 
+func (i *Importer) info(msg string, args ...any) {
+	if i.Logger != nil {
+		i.Logger.Info(msg, args...)
+		return
+	}
+	slog.Info(msg, args...)
+}
+
 func (req Request) withDefaults(cfg Config) Request {
 	if strings.TrimSpace(req.WorkspaceID) == "" {
 		req.WorkspaceID = cfg.DefaultWorkspaceID
@@ -1268,6 +1414,7 @@ func (i *Importer) normalize(req Request) (normalizedRecord, error) {
 		return normalizedRecord{}, ErrMissingTitle
 	}
 	name := textValue(fields[m.Name])
+	productManager := textValue(fields[m.ProductManager])
 	notes := textValue(fields[m.Notes])
 
 	rec := normalizedRecord{
@@ -1281,8 +1428,9 @@ func (i *Importer) normalize(req Request) (normalizedRecord, error) {
 		VersionType:    textValue(fields[m.VersionType]),
 		Title:          title,
 		Name:           name,
+		ProductManager: productManager,
 		Notes:          notes,
-		Description:    buildDescription(name, notes, req.RecordURL),
+		Description:    buildDescription(name, productManager, notes, req.RecordURL),
 		AssigneeUserID: strings.TrimSpace(req.AssigneeUserID),
 		Attachments:    attachmentSources(fields[m.Attachments]),
 		RawFields:      fields,
@@ -1306,6 +1454,9 @@ func (m FieldMapping) withDefaults() FieldMapping {
 	}
 	if strings.TrimSpace(m.Name) == "" {
 		m.Name = "需求名称"
+	}
+	if strings.TrimSpace(m.ProductManager) == "" {
+		m.ProductManager = "产品经理"
 	}
 	if strings.TrimSpace(m.Notes) == "" {
 		m.Notes = "备注"
@@ -1335,20 +1486,56 @@ func hasRequestFields(req Request) bool {
 
 func (i *Importer) hydrateFields(ctx context.Context, req *Request) error {
 	if hasRequestFields(*req) {
+		fields, _ := fieldsFromRequest(*req)
+		i.logExternalIssueFields(*req, fields, "request_payload")
 		return nil
 	}
 	req.BaseToken = firstNonEmpty(req.BaseToken, req.AppToken)
 	if strings.TrimSpace(req.BaseToken) == "" ||
 		strings.TrimSpace(req.TableID) == "" ||
 		strings.TrimSpace(req.RecordID) == "" {
+		i.warn("external issue import: lark record params missing",
+			"workspace_id", strings.TrimSpace(req.WorkspaceID),
+			"base_token_present", strings.TrimSpace(req.BaseToken) != "",
+			"table_id_present", strings.TrimSpace(req.TableID) != "",
+			"record_id_present", strings.TrimSpace(req.RecordID) != "",
+		)
 		return ErrMissingLarkRecordParams
 	}
 	fields, err := i.fetchLarkBaseRecord(ctx, *req)
 	if err != nil {
+		i.warn("external issue import: lark record fetch failed",
+			"workspace_id", strings.TrimSpace(req.WorkspaceID),
+			"base_token", strings.TrimSpace(req.BaseToken),
+			"table_id", strings.TrimSpace(req.TableID),
+			"record_id", strings.TrimSpace(req.RecordID),
+			"error", err,
+		)
 		return err
 	}
+	i.logExternalIssueFields(*req, fields, "openapi_record_fetch")
 	req.Fields = fields
 	return nil
+}
+
+func (i *Importer) logExternalIssueFields(req Request, fields map[string]any, source string) {
+	m := req.FieldMapping.withDefaults()
+	i.info("external issue import: fields loaded",
+		"source", source,
+		"provider", firstNonEmpty(strings.TrimSpace(req.Provider), strings.TrimSpace(req.Source), defaultProvider),
+		"workspace_id", strings.TrimSpace(req.WorkspaceID),
+		"base_token", firstNonEmpty(req.BaseToken, req.AppToken),
+		"table_id", strings.TrimSpace(req.TableID),
+		"record_id", strings.TrimSpace(req.RecordID),
+		"field_count", len(fields),
+		"field_keys", fieldKeys(fields),
+		"version_type", textValue(fields[m.VersionType]),
+		"version", textValue(fields[m.Version]),
+		"name", textValue(fields[m.Name]),
+		"product_manager", textValue(fields[m.ProductManager]),
+		"notes_present", textValue(fields[m.Notes]) != "",
+		"attachment_count", len(attachmentSources(fields[m.Attachments])),
+	)
 }
 
 func (i *Importer) fetchLarkBaseRecord(ctx context.Context, req Request) (map[string]any, error) {
@@ -1519,10 +1706,13 @@ func recordFieldsAndID(record json.RawMessage) (map[string]any, string) {
 	return fields, recordID
 }
 
-func buildDescription(name, notes, recordURL string) string {
+func buildDescription(name, productManager, notes, recordURL string) string {
 	var parts []string
 	if strings.TrimSpace(name) != "" {
 		parts = append(parts, "需求名称："+strings.TrimSpace(name))
+	}
+	if strings.TrimSpace(productManager) != "" {
+		parts = append(parts, "产品经理："+strings.TrimSpace(productManager))
 	}
 	if strings.TrimSpace(notes) != "" {
 		parts = append(parts, "备注："+strings.TrimSpace(notes))
@@ -2055,6 +2245,15 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func fieldKeys(fields map[string]any) []string {
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func textString(t pgtype.Text) string {
