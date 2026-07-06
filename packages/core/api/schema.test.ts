@@ -182,6 +182,7 @@ describe("ApiClient schema fallback", () => {
         daemon_server_url: { wrong: "shape" },
         daemon_app_url: 123,
         workspace_creation_disabled: false,
+        feature_flags: { composio_mcp_apps: true },
       });
       const client = new ApiClient("https://api.example.test");
       const config = await client.getConfig();
@@ -195,6 +196,7 @@ describe("ApiClient schema fallback", () => {
       expect(config.release_repository).toBe("example/multica");
       expect(config.daemon_server_url).toBeUndefined();
       expect(config.daemon_app_url).toBeUndefined();
+      expect(config.feature_flags?.composio_mcp_apps).toBe(true);
     });
   });
 
