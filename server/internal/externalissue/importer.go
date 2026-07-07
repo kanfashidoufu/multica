@@ -618,35 +618,108 @@ func (i *Importer) ImportBugSync(ctx context.Context, req BugSyncRequest) (BugSy
 
 	workspaceIDRaw := firstNonEmpty(req.WorkspaceID, cfg.DefaultWorkspaceID)
 	if workspaceIDRaw == "" {
+		i.warn("external bug sync: workspace missing",
+			"provider", bugProvider(req.Payload),
+			"event_id", req.Payload.EventID,
+			"source_env", req.Payload.SourceEnv,
+			"item_count", len(req.Payload.Items),
+		)
 		return BugSyncResult{}, ErrMissingWorkspaceID
 	}
 	workspaceID, err := util.ParseUUID(workspaceIDRaw)
 	if err != nil {
+		i.warn("external bug sync: workspace invalid",
+			"provider", bugProvider(req.Payload),
+			"workspace_id", workspaceIDRaw,
+			"event_id", req.Payload.EventID,
+			"error", err,
+		)
 		return BugSyncResult{}, ErrMissingWorkspaceID
 	}
 
 	defaultUserID := firstNonEmpty(strings.TrimSpace(req.AssigneeUserID), cfg.DefaultAssigneeExternalUserID)
 	if defaultUserID == "" {
+		i.warn("external bug sync: default assignee missing",
+			"provider", bugProvider(req.Payload),
+			"workspace_id", util.UUIDToString(workspaceID),
+			"event_id", req.Payload.EventID,
+		)
 		return BugSyncResult{}, ErrMissingDefaultAssignee
 	}
 	defaultAssignee, err := i.resolveMemberByExternalUserID(ctx, workspaceID, defaultUserID)
 	if err != nil {
+		i.warn("external bug sync: default assignee resolve failed",
+			"provider", bugProvider(req.Payload),
+			"workspace_id", util.UUIDToString(workspaceID),
+			"event_id", req.Payload.EventID,
+			"assignee_user_id", defaultUserID,
+			"error", err,
+		)
 		return BugSyncResult{}, err
 	}
 
 	provider := bugProvider(req.Payload)
+	i.info("external bug sync: batch started",
+		"provider", provider,
+		"workspace_id", util.UUIDToString(workspaceID),
+		"event_id", req.Payload.EventID,
+		"event_type", req.Payload.EventType,
+		"source_env", req.Payload.SourceEnv,
+		"item_count", len(req.Payload.Items),
+	)
 	result := BugSyncResult{Provider: provider}
 	for _, item := range req.Payload.Items {
+		recordID := bugRecordID(item)
+		i.info("external bug sync: item received",
+			"provider", provider,
+			"workspace_id", util.UUIDToString(workspaceID),
+			"record_id", recordID,
+			"external_key", item.ExternalKey,
+			"bug_id", item.BugID,
+			"event", item.Event,
+			"entity_type", item.EntityType,
+		)
 		assignee, err := i.resolveBugAssigneeMember(ctx, workspaceID, item, defaultAssignee)
 		if err != nil {
+			i.warn("external bug sync: item assignee resolve failed",
+				"provider", provider,
+				"workspace_id", util.UUIDToString(workspaceID),
+				"record_id", recordID,
+				"external_key", item.ExternalKey,
+				"bug_id", item.BugID,
+				"error", err,
+			)
 			return result, err
 		}
+		i.info("external bug sync: item assignee resolved",
+			"provider", provider,
+			"workspace_id", util.UUIDToString(workspaceID),
+			"record_id", recordID,
+			"external_key", item.ExternalKey,
+			"bug_id", item.BugID,
+			"assignee_id", util.UUIDToString(assignee.UserID),
+			"used_default_assignee", assignee.UserID == defaultAssignee.UserID,
+		)
 		itemResult, err := i.importBugSyncItem(ctx, req.Payload, item, workspaceID, assignee.UserID)
 		if err != nil {
+			i.warn("external bug sync: item import failed",
+				"provider", provider,
+				"workspace_id", util.UUIDToString(workspaceID),
+				"record_id", recordID,
+				"external_key", item.ExternalKey,
+				"bug_id", item.BugID,
+				"error", err,
+			)
 			return result, err
 		}
 		result.Items = append(result.Items, itemResult)
 	}
+	i.info("external bug sync: batch completed",
+		"provider", provider,
+		"workspace_id", util.UUIDToString(workspaceID),
+		"event_id", req.Payload.EventID,
+		"item_count", len(result.Items),
+	)
 	return result, nil
 }
 
@@ -654,9 +727,26 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 	provider := bugProvider(payload)
 	recordID := bugRecordID(item)
 	if recordID == "" {
+		i.warn("external bug sync: record id missing",
+			"provider", provider,
+			"workspace_id", util.UUIDToString(workspaceID),
+			"external_key", item.ExternalKey,
+			"bug_id", item.BugID,
+			"event", item.Event,
+			"entity_type", item.EntityType,
+		)
 		return BugSyncItemResult{}, ErrMissingRecordID
 	}
 	if !bugSyncEventSupported(item.Event) {
+		i.info("external bug sync: item ignored",
+			"provider", provider,
+			"workspace_id", util.UUIDToString(workspaceID),
+			"record_id", recordID,
+			"external_key", item.ExternalKey,
+			"bug_id", item.BugID,
+			"event", item.Event,
+			"reason", "unsupported_event",
+		)
 		return BugSyncItemResult{
 			Ignored:        true,
 			Reason:         "unsupported_event",
@@ -670,14 +760,44 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 	originID := sourceOriginID(provider, payload.SourceEnv, firstNonEmpty(item.EntityType, "version_bug"), recordID)
 	title := bugIssueTitle(item)
 	if title == "" {
+		i.warn("external bug sync: title missing",
+			"provider", provider,
+			"workspace_id", util.UUIDToString(workspaceID),
+			"record_id", recordID,
+			"external_key", item.ExternalKey,
+			"bug_id", item.BugID,
+		)
 		return BugSyncItemResult{}, ErrMissingTitle
 	}
 	description := bugIssueDescription(item)
 	status := bugIssueStatus(item)
 	priority := bugIssuePriority(item)
 	metadata := bugIssueMetadata(payload, item, provider, recordID)
+	i.info("external bug sync: item normalized",
+		"provider", provider,
+		"workspace_id", util.UUIDToString(workspaceID),
+		"record_id", recordID,
+		"external_key", item.ExternalKey,
+		"bug_id", item.BugID,
+		"event", item.Event,
+		"entity_type", item.EntityType,
+		"title", title,
+		"status", status,
+		"priority", priority,
+		"description_present", strings.TrimSpace(description) != "",
+		"metadata_key_count", len(metadata),
+	)
 	metadataBytes, err := json.Marshal(metadata)
 	if err != nil {
+		i.warn("external bug sync: metadata marshal failed",
+			"provider", provider,
+			"workspace_id", util.UUIDToString(workspaceID),
+			"record_id", recordID,
+			"external_key", item.ExternalKey,
+			"bug_id", item.BugID,
+			"metadata_key_count", len(metadata),
+			"error", err,
+		)
 		return BugSyncItemResult{}, err
 	}
 
@@ -687,6 +807,15 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 		OriginID:    originID,
 	})
 	if err == nil {
+		i.info("external bug sync: existing issue matched",
+			"provider", provider,
+			"workspace_id", util.UUIDToString(workspaceID),
+			"record_id", recordID,
+			"external_key", item.ExternalKey,
+			"bug_id", item.BugID,
+			"issue_id", util.UUIDToString(existing.ID),
+			"issue_number", existing.Number,
+		)
 		updated, err := i.Queries.UpdateIssueFromExternalSync(ctx, db.UpdateIssueFromExternalSyncParams{
 			Title:       title,
 			Description: util.StrToText(description),
@@ -697,8 +826,30 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 			WorkspaceID: existing.WorkspaceID,
 		})
 		if err != nil {
+			i.warn("external bug sync: existing issue update failed",
+				"provider", provider,
+				"workspace_id", util.UUIDToString(workspaceID),
+				"record_id", recordID,
+				"external_key", item.ExternalKey,
+				"bug_id", item.BugID,
+				"issue_id", util.UUIDToString(existing.ID),
+				"error", err,
+			)
 			return BugSyncItemResult{}, fmt.Errorf("update external bug issue: %w", err)
 		}
+		i.info("external bug sync: existing issue updated",
+			"provider", provider,
+			"workspace_id", util.UUIDToString(workspaceID),
+			"record_id", recordID,
+			"external_key", item.ExternalKey,
+			"bug_id", item.BugID,
+			"issue_id", util.UUIDToString(updated.ID),
+			"issue_number", updated.Number,
+			"status", updated.Status,
+			"priority", updated.Priority,
+			"title_changed", existing.Title != updated.Title,
+			"description_changed", textString(existing.Description) != textString(updated.Description),
+		)
 		i.publishExternalIssueUpdated(ctx, existing, updated, "external_bug_sync")
 		i.publishIssueMetadataChanged(updated, "external_bug_sync")
 		return BugSyncItemResult{
@@ -711,6 +862,14 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 		}, nil
 	}
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		i.warn("external bug sync: existing issue lookup failed",
+			"provider", provider,
+			"workspace_id", util.UUIDToString(workspaceID),
+			"record_id", recordID,
+			"external_key", item.ExternalKey,
+			"bug_id", item.BugID,
+			"error", err,
+		)
 		return BugSyncItemResult{}, fmt.Errorf("lookup existing bug issue by origin: %w", err)
 	}
 
@@ -744,6 +903,15 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 			OriginID:    originID,
 		})
 		if lookupErr == nil {
+			i.info("external bug sync: create raced existing issue",
+				"provider", provider,
+				"workspace_id", util.UUIDToString(workspaceID),
+				"record_id", recordID,
+				"external_key", item.ExternalKey,
+				"bug_id", item.BugID,
+				"issue_id", util.UUIDToString(existing.ID),
+				"issue_number", existing.Number,
+			)
 			updated, updateErr := i.Queries.UpdateIssueFromExternalSync(ctx, db.UpdateIssueFromExternalSyncParams{
 				Title:       title,
 				Description: util.StrToText(description),
@@ -754,8 +922,28 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 				WorkspaceID: existing.WorkspaceID,
 			})
 			if updateErr != nil {
+				i.warn("external bug sync: raced issue update failed",
+					"provider", provider,
+					"workspace_id", util.UUIDToString(workspaceID),
+					"record_id", recordID,
+					"external_key", item.ExternalKey,
+					"bug_id", item.BugID,
+					"issue_id", util.UUIDToString(existing.ID),
+					"error", updateErr,
+				)
 				return BugSyncItemResult{}, fmt.Errorf("update raced external bug issue: %w", updateErr)
 			}
+			i.info("external bug sync: raced issue updated",
+				"provider", provider,
+				"workspace_id", util.UUIDToString(workspaceID),
+				"record_id", recordID,
+				"external_key", item.ExternalKey,
+				"bug_id", item.BugID,
+				"issue_id", util.UUIDToString(updated.ID),
+				"issue_number", updated.Number,
+				"status", updated.Status,
+				"priority", updated.Priority,
+			)
 			i.publishExternalIssueUpdated(ctx, existing, updated, "external_bug_sync")
 			i.publishIssueMetadataChanged(updated, "external_bug_sync")
 			return BugSyncItemResult{
@@ -769,8 +957,27 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 		}
 	}
 	if err != nil {
+		i.warn("external bug sync: issue create failed",
+			"provider", provider,
+			"workspace_id", util.UUIDToString(workspaceID),
+			"record_id", recordID,
+			"external_key", item.ExternalKey,
+			"bug_id", item.BugID,
+			"error", err,
+		)
 		return BugSyncItemResult{}, err
 	}
+	i.info("external bug sync: issue created",
+		"provider", provider,
+		"workspace_id", util.UUIDToString(workspaceID),
+		"record_id", recordID,
+		"external_key", item.ExternalKey,
+		"bug_id", item.BugID,
+		"issue_id", util.UUIDToString(res.Issue.ID),
+		"issue_number", res.Issue.Number,
+		"status", status,
+		"priority", priority,
+	)
 
 	updated, err := i.Queries.UpdateIssueFromExternalSync(ctx, db.UpdateIssueFromExternalSyncParams{
 		Title:       title,
@@ -782,8 +989,29 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 		WorkspaceID: res.Issue.WorkspaceID,
 	})
 	if err != nil {
+		i.warn("external bug sync: created issue metadata stamp failed",
+			"provider", provider,
+			"workspace_id", util.UUIDToString(workspaceID),
+			"record_id", recordID,
+			"external_key", item.ExternalKey,
+			"bug_id", item.BugID,
+			"issue_id", util.UUIDToString(res.Issue.ID),
+			"error", err,
+		)
 		return BugSyncItemResult{}, fmt.Errorf("stamp external bug metadata: %w", err)
 	}
+	i.info("external bug sync: created issue metadata stamped",
+		"provider", provider,
+		"workspace_id", util.UUIDToString(workspaceID),
+		"record_id", recordID,
+		"external_key", item.ExternalKey,
+		"bug_id", item.BugID,
+		"issue_id", util.UUIDToString(updated.ID),
+		"issue_number", updated.Number,
+		"status", updated.Status,
+		"priority", updated.Priority,
+		"metadata_key_count", len(metadata),
+	)
 	i.publishIssueMetadataChanged(updated, "external_bug_sync")
 	i.notifyAssignee(ctx, updated, assigneeID)
 	return BugSyncItemResult{
