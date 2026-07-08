@@ -14,7 +14,6 @@ import {
   type DetectResult,
 } from "@/features/landing/utils/os-detect";
 import type { LatestRelease } from "@/features/landing/utils/github-release";
-import { captureDownloadPageViewed } from "@multica/core/analytics";
 
 export function DownloadClient({ release }: { release: LatestRelease }) {
   const [detected, setDetected] = useState<DetectResult | null>(null);
@@ -25,25 +24,11 @@ export function DownloadClient({ release }: { release: LatestRelease }) {
     detectOS().then((result) => {
       if (cancelled) return;
       setDetected(result);
-      // Fires once per page mount after detect resolves. Carries the
-      // detect outcome + version-unavailable flag so PostHog can split
-      // Safari-mac-arm64 fallback rate, Intel-Mac dead-end rate, and
-      // rate-limit degraded sessions. `first_detected_os/arch` is
-      // $set_once'd on the person so every downstream event gains a
-      // platform dimension (useful for "Android visitors who later
-      // downloaded Windows" style cross-device queries once we land
-      // the desktop install closure).
-      captureDownloadPageViewed({
-        detected_os: result.os,
-        detected_arch: result.arch,
-        detect_confident: result.archConfident,
-        version_available: !versionUnavailable,
-      });
     });
     return () => {
       cancelled = true;
     };
-  }, [versionUnavailable]);
+  }, []);
 
   const releaseHtmlUrl = release.htmlUrl ?? release.allReleasesUrl;
 
@@ -61,15 +46,12 @@ export function DownloadClient({ release }: { release: LatestRelease }) {
           detected={detected}
           assets={release.assets}
           versionUnavailable={versionUnavailable}
-          version={release.version}
         />
       </div>
 
       <AllPlatforms
         assets={release.assets}
         fallbackHref={release.allReleasesUrl}
-        version={release.version}
-        detected={detected}
       />
       <CliSection />
       <CloudSection />
