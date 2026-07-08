@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -101,6 +102,12 @@ func isExternalBugSyncProbe(values url.Values) bool {
 }
 
 func handleExternalBugSync(w http.ResponseWriter, r *http.Request, importer *externalissue.Importer, buildIssueResponse func(context.Context, db.Issue, []db.Attachment) IssueResponse) {
+	if err := logExternalBugSyncRequestBody(r); err != nil {
+		slog.Warn("external bug sync request body read failed",
+			append(logger.RequestAttrs(r), "error", err)...)
+		writeError(w, http.StatusBadRequest, "invalid bug sync request body")
+		return
+	}
 	req, err := decodeExternalBugSyncRequest(r)
 	if err != nil {
 		slog.Warn("external bug sync decode failed",
@@ -165,6 +172,22 @@ func handleExternalBugSync(w http.ResponseWriter, r *http.Request, importer *ext
 		resp["issue"] = buildIssueResponse(r.Context(), item.Issue, nil)
 	}
 	writeJSON(w, status, resp)
+}
+
+func logExternalBugSyncRequestBody(r *http.Request) error {
+	if r.Body == nil {
+		slog.Info("external bug sync request body received",
+			append(logger.RequestAttrs(r), "request_body_bytes", 0, "request_body", "")...)
+		return nil
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	slog.Info("external bug sync request body received",
+		append(logger.RequestAttrs(r), "request_body_bytes", len(body), "request_body", string(body))...)
+	return nil
 }
 
 func decodeExternalBugSyncRequest(r *http.Request) (externalissue.BugSyncRequest, error) {

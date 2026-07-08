@@ -1,10 +1,13 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -142,6 +145,35 @@ func TestImportExternalIssueBugSyncCreatesIssue(t *testing.T) {
 	}
 	if resp.Issue.Description == nil || !strings.Contains(*resp.Issue.Description, "[结果]\n白屏") {
 		t.Fatalf("description = %#v", resp.Issue.Description)
+	}
+}
+
+func TestLogExternalBugSyncRequestBodyPreservesBodyForDecode(t *testing.T) {
+	var buf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	raw := `{"schema_version":"syndra.multica.version_bug.webhook.v1","event_id":"evt-log-raw-body","items":[]}`
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/webhooks/external-issues?sync_type=bug&workspace_id=query-workspace&assignee_user_id=query-assignee",
+		strings.NewReader(raw),
+	)
+
+	if err := logExternalBugSyncRequestBody(req); err != nil {
+		t.Fatalf("logExternalBugSyncRequestBody: %v", err)
+	}
+	if logs := buf.String(); !strings.Contains(logs, "evt-log-raw-body") || !strings.Contains(logs, "request_body_bytes="+strconv.Itoa(len(raw))) {
+		t.Fatalf("log output did not include raw body marker and byte count: %s", logs)
+	}
+
+	got, err := decodeExternalBugSyncRequest(req)
+	if err != nil {
+		t.Fatalf("decodeExternalBugSyncRequest after logging: %v", err)
+	}
+	if got.WorkspaceID != "query-workspace" || got.AssigneeUserID != "query-assignee" || got.Payload.EventID != "evt-log-raw-body" {
+		t.Fatalf("decoded request = %#v", got)
 	}
 }
 
