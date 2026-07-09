@@ -47,7 +47,7 @@ Multica 当前支持 `syndra.multica.version_bug.webhook.v1` 结构，按 `items
 | `items[].external_key` | 幂等主键，优先使用；缺失时用 `entity_type:bug_id` |
 | `items[].bug_id` | Bug 平台 ID |
 | `items[].title` | 原始 Bug 标题；Multica issue 标题会自动加上 `【Bug#<bug_id>】【<version_name>】` 前缀 |
-| `items[].description` | Multica issue 描述，支持将简单 HTML `<p>/<br>` 转为文本 |
+| `items[].description` | Multica issue 描述，支持将简单 HTML `<p>/<br>` 转为文本，并将 `http/https` 的 `<img src="...">` 转为 Markdown 图片 |
 | `items[].status/status_name` | 映射为 Multica issue 状态 |
 | `items[].bug_level/priority` | 映射为 Multica issue 优先级 |
 | `items[].bug_type_id/bug_type` | 写入 issue metadata |
