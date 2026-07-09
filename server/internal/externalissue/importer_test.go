@@ -283,6 +283,33 @@ func TestImportUpdatesExistingIssueDescriptionFromRecord(t *testing.T) {
 	}
 }
 
+func TestCleanBugHTMLTextPreservesInlineHTMLImages(t *testing.T) {
+	input := `<p><strong>【参数】</strong></p><p><strong>搜索框没有“维度标识”提示</strong></p><p><img src="https://oss-img.qtshe.com/oss1783568413634_405.png" alt="Clipboard_Screenshot_1783568361.png" width="560" style="width: 560px; max-width: 100%"></p><p><strong>【预期】</strong></p><p>加个提示</p>`
+
+	got := cleanBugHTMLText(input)
+	wantImage := "![Clipboard_Screenshot_1783568361.png](https://oss-img.qtshe.com/oss1783568413634_405.png)"
+	if !strings.Contains(got, wantImage) {
+		t.Fatalf("description missing image markdown %q: %q", wantImage, got)
+	}
+	if !strings.Contains(got, "搜索框没有“维度标识”提示") ||
+		!strings.Contains(got, "【预期】") ||
+		!strings.Contains(got, "加个提示") {
+		t.Fatalf("description text was not preserved: %q", got)
+	}
+}
+
+func TestCleanBugHTMLTextEscapesImageAltAndDropsUnsafeImageSources(t *testing.T) {
+	got := cleanBugHTMLText(`<p><img src='https://oss-img.qtshe.com/screen(1).png' alt='screen[1](draft).png'></p><p><img src="javascript:alert(1)" alt="bad"></p>`)
+
+	wantImage := `![screen\[1\]\(draft\).png](https://oss-img.qtshe.com/screen(1\).png)`
+	if !strings.Contains(got, wantImage) {
+		t.Fatalf("description missing escaped image markdown %q: %q", wantImage, got)
+	}
+	if strings.Contains(got, "javascript:") || strings.Contains(got, "bad") {
+		t.Fatalf("unsafe image source was preserved: %q", got)
+	}
+}
+
 func TestImportBugSyncCreatesAndUpdatesIssue(t *testing.T) {
 	ctx := context.Background()
 	pool := openTestPool(t, ctx)

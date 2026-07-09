@@ -37,6 +37,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
+	htmltokenizer "golang.org/x/net/html"
 )
 
 const (
@@ -1290,11 +1291,90 @@ func cleanBugHTMLText(input string) string {
 	if !strings.Contains(input, "<") {
 		return normalizeBugText(input)
 	}
-	text := bugBreakTagRE.ReplaceAllString(input, "\n")
+	text := replaceBugImageTagsWithMarkdown(input)
+	text = bugBreakTagRE.ReplaceAllString(text, "\n")
 	text = bugBlockOpenTagRE.ReplaceAllString(text, "\n")
 	text = bugListOpenTagRE.ReplaceAllString(text, "\n- ")
 	text = bugAnyTagRE.ReplaceAllString(text, "")
 	return normalizeBugText(text)
+}
+
+func replaceBugImageTagsWithMarkdown(input string) string {
+	tokenizer := htmltokenizer.NewTokenizer(strings.NewReader(input))
+	var b strings.Builder
+	changed := false
+	for {
+		tokenType := tokenizer.Next()
+		raw := string(tokenizer.Raw())
+		switch tokenType {
+		case htmltokenizer.ErrorToken:
+			if errors.Is(tokenizer.Err(), io.EOF) {
+				if !changed {
+					return input
+				}
+				return b.String()
+			}
+			return input
+		case htmltokenizer.StartTagToken, htmltokenizer.SelfClosingTagToken:
+			name, hasAttr := tokenizer.TagName()
+			if !strings.EqualFold(string(name), "img") {
+				b.WriteString(raw)
+				continue
+			}
+			attrs := map[string]string{}
+			for hasAttr {
+				key, value, more := tokenizer.TagAttr()
+				attrs[strings.ToLower(string(key))] = string(value)
+				hasAttr = more
+			}
+			if markdown, ok := bugImageMarkdown(attrs); ok {
+				b.WriteString(markdown)
+			} else {
+				b.WriteString(raw)
+			}
+			changed = true
+		default:
+			b.WriteString(raw)
+		}
+	}
+}
+
+func bugImageMarkdown(attrs map[string]string) (string, bool) {
+	src := strings.TrimSpace(htmlstd.UnescapeString(attrs["src"]))
+	if !isAllowedBugImageSrc(src) {
+		return "", false
+	}
+	alt := strings.TrimSpace(htmlstd.UnescapeString(attrs["alt"]))
+	if alt == "" {
+		if parsed, err := url.Parse(src); err == nil {
+			base := path.Base(parsed.Path)
+			if base != "." && base != "/" {
+				alt = base
+			}
+		}
+	}
+	return fmt.Sprintf("![%s](%s)", escapeMarkdownLabel(alt), escapeMarkdownDestination(src)), true
+}
+
+func isAllowedBugImageSrc(src string) bool {
+	parsed, err := url.Parse(src)
+	if err != nil {
+		return false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	return (scheme == "http" || scheme == "https") && parsed.Host != ""
+}
+
+func escapeMarkdownDestination(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '\\', ')':
+			b.WriteRune('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func normalizeBugText(input string) string {
