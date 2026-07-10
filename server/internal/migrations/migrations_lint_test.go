@@ -30,7 +30,9 @@ var legacyDuplicateMigrationStems = map[string][]string{
 	"065": {"065_backfill_onboarded_at", "065_project_resources"},
 	"069": {"069_comment_resolved_at", "069_drop_task_last_heartbeat"},
 	"079": {"079_autopilot_run_skipped_status", "079_backfill_api_invalid_request", "079_github_integration"},
-	"083": {"083_attachment_chat_columns", "083_runtime_visibility"},
+	"081": {"081_runtime_timezone", "081_user_external_identity"},
+	"082": {"082_notification_delivery", "082_rollup_runtime_timezone"},
+	"083": {"083_attachment_chat_columns", "083_lark_invitation_delivery", "083_runtime_visibility"},
 	"084": {"084_squad", "084_task_usage_dashboard_rollup"},
 	"091": {"091_autopilot_webhook_triggers", "091_issue_start_date", "091_pr_ci_conflict"},
 	"095": {"095_agent_thinking_level", "095_backfill_starter_content_state"},
@@ -40,11 +42,13 @@ var legacyDuplicateMigrationStems = map[string][]string{
 	"111": {"111_issue_origin_lark_chat", "111_workspace_avatar"},
 	"112": {"112_issue_dates_to_date", "112_lark_installation_bot_union_id"},
 	"113": {"113_lark_inbound_dedup_per_installation", "113_sys_cron_executions"},
+	"117": {"117_agent_task_queue_initiator_user_id", "117_issue_origin_external_issue"},
 	"120": {"120_autopilot_subscriber", "120_comment_source_task_id", "120_github_pending_installation", "120_runtime_profile"},
 	"122": {"122_lark_chat_session_binding_thread_reply", "122_task_handoff_note"},
 	"124": {"124_autopilot_run_planned_at", "124_channel_generalization", "124_task_prepare_lease"},
 	"127": {"127_issue_pull_request_reference_only", "127_task_squad_id", "127_user_composio_connection"},
 	"128": {"128_agent_task_queue_runtime_mcp_overlay", "128_autopilot_collaborator", "128_comment_routing_escalation"},
+	"132": {"132_agent_task_queue_runtime_connected_apps", "132_issue_origin_type_external_issue_repair"},
 }
 
 var migrationPrefixPattern = regexp.MustCompile(`^(\d+)_`)
@@ -170,10 +174,10 @@ func isKnownLegacyPrefix(prefix string) bool {
 		"037", "038", "039", "042", "044", "045", "047", "048", "049", "051",
 		"052", "053", "054", "055", "056", "057", "058", "059", "061", "062",
 		"063", "064", "066", "067", "068", "072", "073", "074", "075", "076",
-		"077", "078", "080", "081", "082", "085", "086", "087", "088", "089",
+		"077", "078", "080", "085", "086", "087", "088", "089",
 		"090", "092", "093", "094", "097", "100", "101", "102", "103", "104",
-		"105", "106", "107", "108", "110", "114", "115", "116", "117", "118",
-		"119", "121", "123", "125", "126", "129", "130", "131", "132", "133",
+		"105", "106", "107", "108", "110", "114", "115", "116", "118",
+		"119", "121", "123", "125", "126", "129", "130", "131", "133",
 		"134", "135", "136", "137", "138", "139", "140", "141", "142", "143",
 		"144", "145", "146", "147", "148":
 		return true
