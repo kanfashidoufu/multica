@@ -1,4 +1,4 @@
-.PHONY: help makehelp dev server daemon cli multica build test migrate-up migrate-down sqlc seed clean setup start stop check worktree-env setup-main start-main stop-main check-main setup-worktree start-worktree stop-worktree check-worktree db-up db-down db-reset selfhost selfhost-build selfhost-stop
+.PHONY: help makehelp dev server daemon cli multica build test migration-lint migrate-up migrate-down sqlc seed clean setup start stop check worktree-env setup-main start-main stop-main check-main setup-worktree start-worktree stop-worktree check-worktree db-up db-down db-reset selfhost selfhost-build selfhost-stop
 
 MAIN_ENV_FILE ?= .env
 WORKTREE_ENV_FILE ?= .env.worktree
@@ -331,6 +331,9 @@ test: ## Run Go tests after ensuring the target DB exists and migrations are app
 	# fails this target instead of being swallowed by command substitution.
 	cd server && pkgs="$$(go list ./...)" && pkgs="$$(printf '%s\n' "$$pkgs" | grep -vE '/pkg/agent(/|$$)')" && go test -race $$pkgs
 	cd server && go test -race -p 2 -parallel 2 ./pkg/agent/...
+
+migration-lint: ## Check migration filenames and numbering without a database
+	cd server && go test ./internal/migrations -count=1
 
 # Database
 ##@ Database
