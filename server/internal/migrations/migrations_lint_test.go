@@ -2,6 +2,7 @@ package migrations
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -12,7 +13,13 @@ import (
 	"testing"
 )
 
-const maxLegacyMigrationPrefix = 148
+const (
+	maxLegacyMigrationPrefix   = 148
+	localMigrationPrefixStart  = 900000
+	localMigrationPrefixEnd    = 999999
+	localMigrationStemMarker   = "_local_"
+	localMigrationScaffoldTODO = "TODO(local-migration)"
+)
 
 var legacyDuplicateMigrationStems = map[string][]string{
 	"020": {"020_issue_number", "020_task_session"},
@@ -49,6 +56,10 @@ var legacyDuplicateMigrationStems = map[string][]string{
 	"127": {"127_issue_pull_request_reference_only", "127_task_squad_id", "127_user_composio_connection"},
 	"128": {"128_agent_task_queue_runtime_mcp_overlay", "128_autopilot_collaborator", "128_comment_routing_escalation"},
 	"132": {"132_agent_task_queue_runtime_connected_apps", "132_issue_origin_type_external_issue_repair"},
+	// The downstream v0.3.43 release shipped agent_task_delivered_comments as
+	// 161 before upstream assigned the same numeric prefix to agent_skill_enabled.
+	// Migration identity is the full stem, so preserve this published pair.
+	"161": {"161_agent_skill_enabled", "161_agent_task_delivered_comments"},
 }
 
 var migrationPrefixPattern = regexp.MustCompile(`^(\d+)_`)
@@ -107,6 +118,41 @@ func TestNewMigrationPrefixesStartAfterLegacyRange(t *testing.T) {
 		}
 		if n <= maxLegacyMigrationPrefix && !isKnownLegacyPrefix(prefix) {
 			t.Errorf("migration prefix %s is in the frozen legacy range 001-%03d: %v; new migrations must start at %03d", prefix, maxLegacyMigrationPrefix, stems, maxLegacyMigrationPrefix+1)
+		}
+	}
+}
+
+func TestLocalMigrationsUseReservedPrefixRange(t *testing.T) {
+	stemsByPrefix := migrationStemsByPrefix(t)
+
+	for prefix, stems := range stemsByPrefix {
+		n, err := strconv.Atoi(prefix)
+		if err != nil {
+			t.Fatalf("parse migration prefix %q: %v", prefix, err)
+		}
+		inLocalRange := n >= localMigrationPrefixStart && n <= localMigrationPrefixEnd
+		for _, stem := range stems {
+			isLocal := strings.HasPrefix(stem, prefix+localMigrationStemMarker)
+			switch {
+			case isLocal && !inLocalRange:
+				t.Errorf("local migration %s must use reserved prefix range %d-%d; create it with make migration-new-local NAME=<name>", stem, localMigrationPrefixStart, localMigrationPrefixEnd)
+			case inLocalRange && !isLocal:
+				t.Errorf("migration %s uses the local-only prefix range %d-%d but is missing the %q marker", stem, localMigrationPrefixStart, localMigrationPrefixEnd, localMigrationStemMarker)
+			}
+		}
+	}
+}
+
+func TestLocalMigrationScaffoldsAreCompleted(t *testing.T) {
+	files := migrationFilesForLint(t, "*.sql")
+
+	for _, file := range files {
+		contents, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", filepath.Base(file), err)
+		}
+		if strings.Contains(string(contents), localMigrationScaffoldTODO) {
+			t.Errorf("local migration %s still contains its scaffold TODO; add the migration SQL before committing", filepath.Base(file))
 		}
 	}
 }

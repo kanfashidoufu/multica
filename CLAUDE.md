@@ -110,6 +110,13 @@ CI runs Node 22, Go 1.26.1, and a `pgvector/pgvector:pg17` PostgreSQL service.
 - Reserved slugs live in `server/internal/handler/reserved_slugs.json`. Edit it, run `pnpm generate:reserved-slugs`, and commit the generated `packages/core/paths/reserved-slugs.ts`.
 - When changing CLI commands/flags, API fields, or product behavior documented by built-in skills under `server/internal/service/builtin_skills/*`, update the relevant `SKILL.md` and `references/*-source-map.md` in the same PR.
 
+## Database Migration Rules
+
+- Keep upstream migration filenames unchanged when merging from `main`; never renumber an upstream migration to work around a downstream collision.
+- Create downstream/local-only migrations with `make migration-new-local NAME=<snake_case_name>`. They use the reserved `900000`-`999999` range and the `<prefix>_local_<name>` stem format.
+- Published migration stems are immutable because the full stem is recorded in `schema_migrations`. Historical downstream collisions must be grandfathered as an exact stem set in `migrations_lint_test.go`, not resolved by renaming a published file.
+- Upstream syncs may introduce lower-numbered migrations after a local migration has already run. Local migration SQL must therefore be idempotent where practical and must not assume it will always execute after every future upstream migration.
+
 ## API Compatibility
 
 Frontend code must survive backend response drift, especially in installed desktop builds.

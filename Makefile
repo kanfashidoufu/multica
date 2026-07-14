@@ -1,4 +1,4 @@
-.PHONY: help makehelp dev server daemon cli multica build test migration-lint migrate-up migrate-down sqlc seed clean setup start stop check worktree-env setup-main start-main stop-main check-main setup-worktree start-worktree stop-worktree check-worktree db-up db-down db-reset selfhost selfhost-build selfhost-stop
+.PHONY: help makehelp dev server daemon cli multica build test migration-lint migration-new-local migrate-up migrate-down sqlc seed clean setup start stop check worktree-env setup-main start-main stop-main check-main setup-worktree start-worktree stop-worktree check-worktree db-up db-down db-reset selfhost selfhost-build selfhost-stop
 
 MAIN_ENV_FILE ?= .env
 WORKTREE_ENV_FILE ?= .env.worktree
@@ -334,6 +334,9 @@ test: ## Run Go tests after ensuring the target DB exists and migrations are app
 
 migration-lint: ## Check migration filenames and numbering without a database
 	cd server && go test ./internal/migrations -count=1
+
+migration-new-local: ## Create a local-only migration in the reserved 900000-999999 range
+	@bash scripts/new-local-migration.sh "$(NAME)"
 
 # Database
 ##@ Database
