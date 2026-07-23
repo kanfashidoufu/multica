@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { capturePageview } from "@multica/core/analytics";
+import { captureEvent } from "@multica/core/analytics";
 import { useAuthStore } from "@multica/core/auth";
 import {
   getActiveTab,
@@ -45,7 +45,7 @@ export function PageviewTracker() {
   const user = useAuthStore((s) => s.user);
   const overlay = useWindowOverlayStore((s) => s.overlay);
   const { slug: activeWorkspaceSlug, tabId: activeTabId } = useActiveTabIdentity();
-  const activeTabPath = useTabStore((s) => getActiveTab(s)?.path ?? null);
+  const activeTabPath = useTabStore((s) => getActiveTab(s)?.url ?? null);
 
   // (slug:tabId) → last path observed while that tab was visible. Lets us
   // tell "re-activating a tab on a path we already saw" (suppress) apart
@@ -57,7 +57,7 @@ export function PageviewTracker() {
     const seed = new Map<string, string>();
     for (const [slug, group] of Object.entries(useTabStore.getState().byWorkspace)) {
       for (const tab of group.tabs) {
-        seed.set(`${slug}:${tab.id}`, tab.path);
+        seed.set(`${slug}:${tab.id}`, tab.url);
       }
     }
     observedTabsRef.current = seed;
@@ -116,7 +116,7 @@ export function PageviewTracker() {
       last.kind === kind && last.key === key && last.path === path;
     if (unchanged) return;
 
-    capturePageview(path);
+    captureEvent("$pageview", { $current_url: path });
     lastSurfaceRef.current = next;
   }, [user, overlay, activeWorkspaceSlug, activeTabId, activeTabPath]);
 

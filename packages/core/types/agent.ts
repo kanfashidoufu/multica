@@ -109,6 +109,7 @@ export const RUNTIME_PROFILE_PROTOCOL_FAMILIES = [
   "codex",
   "copilot",
   "opencode",
+  "deveco",
   "openclaw",
   "hermes",
   "pi",
@@ -118,6 +119,8 @@ export const RUNTIME_PROFILE_PROTOCOL_FAMILIES = [
   "antigravity",
   "qoder",
   "traecli",
+  "grok",
+  "qwen",
 ] as const;
 
 export type RuntimeProtocolFamily =
@@ -193,6 +196,50 @@ export interface AgentActivityBucket {
 export interface AgentRunCount {
   agent_id: string;
   run_count: number;
+}
+
+/**
+ * A departed-member-safe user ref resolved from the global user table. `name` /
+ * `email` / `avatar_url` are absent until the server hydrates them (present on
+ * user-facing task surfaces). Render defensively — fall back to a generic label
+ * when only `id` is available. See MUL-4302 §9.
+ */
+export interface AttributionUser {
+  id: string;
+  name?: string;
+  email?: string;
+  avatar_url?: string;
+}
+
+/** The kind-tagged handle to a run's direct cause (comment, autopilot run, ...). */
+export interface TaskEvidence {
+  kind: string;
+  ref_id: string;
+}
+
+/**
+ * The resolved accountable-human provenance of an agent run (MUL-4302 §9). Free-text
+ * `source` (server may add new levels), so switch on it with a default branch.
+ */
+export interface TaskAttribution {
+  /**
+   * Waterfall level that resolved the accountable human:
+   * `direct_human` | `delegation` | `comment_source` | `rule_owner` |
+   * `owner_fallback` | `backfill` | `unattributed`. Never blank.
+   */
+  source: string;
+  /** False for degraded sources (owner_fallback / backfill / unattributed). */
+  precise: boolean;
+  /** The accountable human ("on behalf of"). Absent when unattributed. */
+  initiator?: AttributionUser;
+  /** The authorization human; absent for autopilot runs (rule_owner / owner_fallback). */
+  originator?: AttributionUser;
+  /** The direct cause of the run, for a jump-to-evidence affordance. */
+  evidence?: TaskEvidence;
+  rule_version_id?: string;
+  delegated_from_task_id?: string;
+  retry_of_task_id?: string;
+  rerun_of_task_id?: string;
 }
 
 export interface AgentTask {
@@ -293,6 +340,12 @@ export interface AgentTask {
    * shares and screenshots also stay safe).
    */
   relative_work_dir?: string;
+  /**
+   * Resolved accountable-human provenance of this run (MUL-4302 §9): who it ran
+   * "on behalf of", how that was resolved, and the evidence/lineage. Present on
+   * user-facing task surfaces; older backends omit it — render conditionally.
+   */
+  attribution?: TaskAttribution;
 }
 
 export interface Agent {
@@ -392,10 +445,30 @@ export interface Agent {
   thinking_level?: string;
   owner_id: string | null;
   skills: AgentSkillSummary[];
+  /** Runtime-local skills this agent must not inherit. Older servers omit it. */
+  disabled_runtime_skills?: DisabledRuntimeSkill[];
   created_at: string;
   updated_at: string;
   archived_at: string | null;
   archived_by: string | null;
+}
+
+export interface DisabledRuntimeSkill {
+  runtime_id: string;
+  provider: string;
+  root: "provider" | "universal" | "plugin";
+  key: string;
+  name?: string;
+  plugin?: string;
+}
+
+export interface SetAgentRuntimeSkillEnabledRequest {
+  runtime_id: string;
+  root: "provider" | "universal" | "plugin";
+  key: string;
+  name: string;
+  plugin?: string;
+  enabled: boolean;
 }
 
 /**
@@ -889,6 +962,8 @@ export interface RuntimeLocalSkillSummary {
   root?: "provider" | "universal" | "plugin";
   /** Enabled runtime plugin that contributed this skill, when applicable. */
   plugin?: string;
+  /** New daemons set this only when they can enforce per-agent disablement. */
+  can_disable?: boolean;
   file_count: number;
 }
 

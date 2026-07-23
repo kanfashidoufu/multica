@@ -475,7 +475,7 @@ func (i *Importer) Import(ctx context.Context, req Request) (Result, error) {
 		Platform: "external_import:" + rec.Provider,
 	}
 	if i.BroadcastPayload != nil {
-		createOpts.BroadcastPayload = func(issue db.Issue, attachments []db.Attachment) map[string]any {
+		createOpts.BroadcastPayload = func(issue db.Issue, attachments []db.Attachment, _ []db.IssueLabel) map[string]any {
 			return i.BroadcastPayload(ctx, issue, attachments)
 		}
 	}
@@ -879,7 +879,7 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 		Platform: "external_import:" + provider,
 	}
 	if i.BroadcastPayload != nil {
-		createOpts.BroadcastPayload = func(issue db.Issue, attachments []db.Attachment) map[string]any {
+		createOpts.BroadcastPayload = func(issue db.Issue, attachments []db.Attachment, _ []db.IssueLabel) map[string]any {
 			return i.BroadcastPayload(ctx, issue, attachments)
 		}
 	}
@@ -1293,7 +1293,10 @@ func cleanBugHTMLText(input string) string {
 	}
 	text := replaceBugImageTagsWithMarkdown(input)
 	text = bugBreakTagRE.ReplaceAllString(text, "\n")
-	text = bugBlockOpenTagRE.ReplaceAllString(text, "\n")
+	// Closing block tags already provide the line boundary. Replacing both
+	// </p> and the immediately following <p> with newlines inserts an empty
+	// paragraph between every Syndra field and breaks the local sync format.
+	text = bugBlockOpenTagRE.ReplaceAllString(text, "")
 	text = bugListOpenTagRE.ReplaceAllString(text, "\n- ")
 	text = bugAnyTagRE.ReplaceAllString(text, "")
 	return normalizeBugText(text)

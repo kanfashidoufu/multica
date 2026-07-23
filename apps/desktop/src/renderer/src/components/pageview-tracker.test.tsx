@@ -9,13 +9,14 @@ const state = vi.hoisted(() => ({
   activeWorkspaceSlug: null as string | null,
   byWorkspace: {} as Record<
     string,
-    { activeTabId: string; tabs: { id: string; path: string }[] }
+    { activeTabId: string; tabs: { id: string; url: string }[] }
   >,
   capturePageview: vi.fn<(path?: string) => void>(),
 }));
 
 vi.mock("@multica/core/analytics", () => ({
-  capturePageview: state.capturePageview,
+  captureEvent: (_name: string, properties?: { $current_url?: string }) =>
+    state.capturePageview(properties?.$current_url),
 }));
 
 // Auth store — single selector pattern (`s => s.user`).
@@ -77,8 +78,8 @@ describe("PageviewTracker", () => {
       acme: {
         activeTabId: "tA",
         tabs: [
-          { id: "tA", path: "/acme/issues" },
-          { id: "tB", path: "/acme/inbox" },
+          { id: "tA", url: "/acme/issues" },
+          { id: "tB", url: "/acme/inbox" },
         ],
       },
     };
@@ -94,8 +95,8 @@ describe("PageviewTracker", () => {
       acme: {
         activeTabId: "tB",
         tabs: [
-          { id: "tA", path: "/acme/issues" },
-          { id: "tB", path: "/acme/inbox" },
+          { id: "tA", url: "/acme/issues" },
+          { id: "tB", url: "/acme/inbox" },
         ],
       },
     };
@@ -107,8 +108,8 @@ describe("PageviewTracker", () => {
       acme: {
         activeTabId: "tA",
         tabs: [
-          { id: "tA", path: "/acme/issues" },
-          { id: "tB", path: "/acme/inbox" },
+          { id: "tA", url: "/acme/issues" },
+          { id: "tB", url: "/acme/inbox" },
         ],
       },
     };
@@ -120,7 +121,7 @@ describe("PageviewTracker", () => {
     state.byWorkspace = {
       acme: {
         activeTabId: "tA",
-        tabs: [{ id: "tA", path: "/acme/issues" }],
+        tabs: [{ id: "tA", url: "/acme/issues" }],
       },
     };
     state.activeWorkspaceSlug = "acme";
@@ -137,8 +138,8 @@ describe("PageviewTracker", () => {
       acme: {
         activeTabId: "tC",
         tabs: [
-          { id: "tA", path: "/acme/issues" },
-          { id: "tC", path: "/acme/agents" },
+          { id: "tA", url: "/acme/issues" },
+          { id: "tC", url: "/acme/agents" },
         ],
       },
     };
@@ -152,7 +153,7 @@ describe("PageviewTracker", () => {
     state.byWorkspace = {
       acme: {
         activeTabId: "tA",
-        tabs: [{ id: "tA", path: "/acme/issues" }],
+        tabs: [{ id: "tA", url: "/acme/issues" }],
       },
     };
     state.activeWorkspaceSlug = "acme";
@@ -163,10 +164,10 @@ describe("PageviewTracker", () => {
     // Cross-workspace navigation: switchWorkspace("butter", "/butter/inbox")
     // creates a fresh tab in the destination workspace and makes it active.
     state.byWorkspace = {
-      acme: { activeTabId: "tA", tabs: [{ id: "tA", path: "/acme/issues" }] },
+      acme: { activeTabId: "tA", tabs: [{ id: "tA", url: "/acme/issues" }] },
       butter: {
         activeTabId: "tD",
-        tabs: [{ id: "tD", path: "/butter/inbox" }],
+        tabs: [{ id: "tD", url: "/butter/inbox" }],
       },
     };
     state.activeWorkspaceSlug = "butter";
@@ -180,7 +181,7 @@ describe("PageviewTracker", () => {
     state.byWorkspace = {
       acme: {
         activeTabId: "tA",
-        tabs: [{ id: "tA", path: "/acme/issues" }],
+        tabs: [{ id: "tA", url: "/acme/issues" }],
       },
     };
     state.activeWorkspaceSlug = "acme";
@@ -191,7 +192,7 @@ describe("PageviewTracker", () => {
     state.byWorkspace = {
       acme: {
         activeTabId: "tA",
-        tabs: [{ id: "tA", path: "/acme/issues/123" }],
+        tabs: [{ id: "tA", url: "/acme/issues/123" }],
       },
     };
     rerender(<PageviewTracker />);
@@ -204,7 +205,7 @@ describe("PageviewTracker", () => {
     state.byWorkspace = {
       acme: {
         activeTabId: "tA",
-        tabs: [{ id: "tA", path: "/acme/issues" }],
+        tabs: [{ id: "tA", url: "/acme/issues" }],
       },
     };
     state.activeWorkspaceSlug = "acme";
@@ -234,7 +235,7 @@ describe("PageviewTracker", () => {
     state.byWorkspace = {
       acme: {
         activeTabId: "tA",
-        tabs: [{ id: "tA", path: "/acme/issues" }],
+        tabs: [{ id: "tA", url: "/acme/issues" }],
       },
     };
     state.activeWorkspaceSlug = "acme";
