@@ -51,6 +51,11 @@ func (s *memoryStorage) Delete(_ context.Context, key string) {
 	delete(s.files, key)
 }
 
+func (s *memoryStorage) DeleteObject(ctx context.Context, key string) error {
+	s.Delete(ctx, key)
+	return nil
+}
+
 func (s *memoryStorage) DeleteKeys(ctx context.Context, keys []string) {
 	for _, key := range keys {
 		s.Delete(ctx, key)
@@ -59,6 +64,10 @@ func (s *memoryStorage) DeleteKeys(ctx context.Context, keys []string) {
 
 func (s *memoryStorage) KeyFromURL(rawURL string) string {
 	return strings.TrimPrefix(rawURL, "https://cdn.example.test/")
+}
+
+func (s *memoryStorage) ObjectURL(key string) string {
+	return "https://cdn.example.test/" + key
 }
 
 func (s *memoryStorage) CdnDomain() string { return "cdn.example.test" }

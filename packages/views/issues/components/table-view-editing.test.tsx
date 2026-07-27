@@ -9,14 +9,26 @@
  * TYPES, so React remounted every cell and the just-opened picker closed.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { setApiInstance } from "@multica/core/api";
 import type { ApiClient } from "@multica/core/api/client";
+import { issueKeys } from "@multica/core/issues/queries";
 import { ViewStoreProvider } from "@multica/core/issues/stores/view-store-context";
 import { getIssueSurfaceViewStore } from "@multica/core/issues/stores/surface-view-store";
-import type { Issue } from "@multica/core/types";
+import type {
+  Issue,
+  IssueTableQuerySpec,
+  IssueTableRowsResponse,
+} from "@multica/core/types";
 import { renderWithI18n } from "../../test/i18n";
 import { IssueSurfaceSelectionProvider } from "../surface/selection-context";
 import type { IssueSurfaceSelection } from "../surface/selection-context";
@@ -142,13 +154,19 @@ const selection: IssueSurfaceSelection = {
   clear: () => {},
 };
 
+const serverQuery: IssueTableQuerySpec = {
+  scope: { kind: "workspace" },
+  filters: {},
+  sort: { field: "position", direction: "asc" },
+};
+
+let serverIssues: Issue[] = [];
+
 function Harness({
-  issues,
   childProgressMap,
   surfaceKey,
   onCreateIssue = () => {},
 }: {
-  issues: Issue[];
   childProgressMap: Map<string, ChildProgress>;
   surfaceKey: string;
   onCreateIssue?: (defaults: IssueCreateDefaults) => void;
@@ -157,17 +175,13 @@ function Harness({
     <ViewStoreProvider store={getIssueSurfaceViewStore(surfaceKey)}>
       <IssueSurfaceSelectionProvider selection={selection}>
         <TableView
-          issues={issues}
+          serverQuery={serverQuery}
           childProgressMap={childProgressMap}
-          fetchNextPage={() => Promise.resolve()}
-          hasNextPage={false}
-          isFetchingNextPage={false}
-          windowError={false}
-          total={issues.length}
           search=""
           onSearchChange={() => {}}
+          onLoadedIssuesChange={() => {}}
           onCreateIssue={onCreateIssue}
-          exportIssues={() => Promise.resolve(issues)}
+          exportIssues={() => Promise.resolve(serverIssues)}
           resolveExportLookups={() =>
             Promise.resolve({
               projectMap: new Map(),
@@ -202,6 +216,18 @@ describe("TableView cell editors under data refresh", () => {
       listAgents: async () => [],
       listSquads: async () => [],
       getAssigneeFrequency: async () => [],
+      listIssueTableRows: async () => ({
+        query_fingerprint: "test",
+        group_key: null,
+        parent_id: null,
+        total: serverIssues.length,
+        rows: serverIssues.map((issue) => ({
+          issue,
+          direct_child_count: 0,
+        })),
+        branch_total: serverIssues.length,
+        next_cursor: null,
+      }),
     } as unknown as ApiClient);
   });
 
@@ -211,21 +237,27 @@ describe("TableView cell editors under data refresh", () => {
   });
 
   // Explicit timeout: this mounts the full TableView with every picker + a
-  // QueryClient, so it is heavier than a unit test. `delay: null` drives
-  // userEvent off fake-synchronous timing instead of the default real-timer
-  // gaps between events, which were what let the whole gesture blow past the
-  // 5s default under concurrent CI worker load (MUL-5108 review R1#1).
+  // QueryClient and drives three realistic userEvent click gestures, each
+  // re-rendering the whole table — far heavier than a unit test. `delay: null`
+  // strips the default real-timer gaps between events (MUL-5108 review R1#1).
+  // Even so, the frontend CI job runs the entire `turbo build typecheck lint
+  // test` pipeline on a 2-core runner, so builds/lints/typechecks and 258
+  // vitest files all oversubscribe both cores at once; at the worst-case
+  // scheduling peak this test's wall clock blew past the earlier 20s cap
+  // (MUL-5326). It runs in ~1s in isolation, so the generous 60s ceiling
+  // (matching the repo's heaviest FE tests) only absorbs CI CPU starvation —
+  // it never masks a real hang.
   it("keeps the status picker open and the row order frozen across a refresh, then catches up on close", async () => {
     const user = userEvent.setup({ delay: null, pointerEventsCheck: 0 });
     const issueA = makeIssue("a", "Alpha task", "todo");
     const issueB = makeIssue("b", "Beta task", "in_progress");
+    serverIssues = [issueA, issueB];
     const progress1 = new Map<string, ChildProgress>();
     const surfaceKey = `test-surface-${Math.floor(Math.random() * 1e9)}`;
 
     const view = renderWithI18n(
       <QueryClientProvider client={queryClient}>
         <Harness
-          issues={[issueA, issueB]}
           childProgressMap={progress1}
           surfaceKey={surfaceKey}
         />
@@ -234,6 +266,7 @@ describe("TableView cell editors under data refresh", () => {
 
     const identifiers = () =>
       screen.getAllByText(/^MUL-/).map((node) => node.textContent);
+    await screen.findByText("MUL-a");
     expect(identifiers()).toEqual(["MUL-a", "MUL-b"]);
 
     // Open the status picker on row A: its cell trigger shows "Todo".
@@ -246,26 +279,45 @@ describe("TableView cell editors under data refresh", () => {
     // childProgressMap. The popup must stay open and the structure must hold
     // (frozen order) so the anchor row cannot move away mid-interaction.
     const refreshedA = { ...issueA, title: "Alpha task (updated)" };
+    serverIssues = [issueB, refreshedA];
     view.rerender(
       <QueryClientProvider client={queryClient}>
         <Harness
-          issues={[issueB, refreshedA]}
           childProgressMap={new Map<string, ChildProgress>()}
           surfaceKey={surfaceKey}
         />
       </QueryClientProvider>,
     );
+    act(() => {
+      queryClient.setQueriesData<IssueTableRowsResponse>(
+        { queryKey: issueKeys.tableAll("ws-1") },
+        (previous) =>
+          previous
+            ? {
+                ...previous,
+                total: serverIssues.length,
+                branch_total: serverIssues.length,
+                rows: serverIssues.map((issue) => ({
+                  issue,
+                  direct_child_count: 0,
+                })),
+              }
+            : previous,
+      );
+    });
 
-    expect(screen.getByRole("button", { name: /Backlog/ })).toBeTruthy();
-    expect(identifiers()).toEqual(["MUL-a", "MUL-b"]);
-    // …while the VALUES inside the frozen rows keep tracking the live data.
-    expect(screen.getByText("Alpha task (updated)")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Backlog/ })).toBeTruthy();
+      expect(identifiers()).toEqual(["MUL-a", "MUL-b"]);
+      // …while the VALUES inside the frozen rows keep tracking live data.
+      expect(screen.getByText("Alpha task (updated)")).toBeTruthy();
+    });
 
     // Selecting a value closes the editor; the deferred live order applies.
     await user.click(screen.getByRole("button", { name: /Backlog/ }));
     expect(screen.queryByRole("button", { name: /Backlog/ })).toBeNull();
     expect(identifiers()).toEqual(["MUL-b", "MUL-a"]);
-  }, 20_000);
+  }, 60_000);
 
   it("opens creation with the row as parent and inherits its project", async () => {
     const user = userEvent.setup({ delay: null, pointerEventsCheck: 0 });
@@ -274,11 +326,11 @@ describe("TableView cell editors under data refresh", () => {
       ...makeIssue("a", "Alpha task", "todo"),
       project_id: "project-1",
     };
+    serverIssues = [issue];
 
     renderWithI18n(
       <QueryClientProvider client={queryClient}>
         <Harness
-          issues={[issue]}
           childProgressMap={new Map()}
           surfaceKey={`test-create-sub-issue-${Math.floor(Math.random() * 1e9)}`}
           onCreateIssue={onCreateIssue}
@@ -286,7 +338,7 @@ describe("TableView cell editors under data refresh", () => {
       </QueryClientProvider>,
     );
 
-    const row = screen.getByText("MUL-a").closest("tr")!;
+    const row = (await screen.findByText("MUL-a")).closest("tr")!;
     await user.click(
       within(row).getByRole("button", { name: "Create sub-issue" }),
     );
@@ -300,12 +352,11 @@ describe("TableView cell editors under data refresh", () => {
 
   it("opens title and row clicks in a foreground Desktop tab", async () => {
     const user = userEvent.setup({ delay: null, pointerEventsCheck: 0 });
-    const issues = [makeIssue("a", "Alpha task", "todo")];
+    serverIssues = [makeIssue("a", "Alpha task", "todo")];
 
     renderWithI18n(
       <QueryClientProvider client={queryClient}>
         <Harness
-          issues={issues}
           childProgressMap={new Map()}
           surfaceKey={`test-new-tab-${Math.floor(Math.random() * 1e9)}`}
         />
@@ -336,12 +387,11 @@ describe("TableView cell editors under data refresh", () => {
     const windowOpen = vi.fn();
     vi.stubGlobal("open", windowOpen);
     navigationState.hasOpenInNewTab = false;
-    const issues = [makeIssue("a", "Alpha task", "todo")];
+    serverIssues = [makeIssue("a", "Alpha task", "todo")];
 
     renderWithI18n(
       <QueryClientProvider client={queryClient}>
         <Harness
-          issues={issues}
           childProgressMap={new Map()}
           surfaceKey={`test-browser-tab-${Math.floor(Math.random() * 1e9)}`}
         />

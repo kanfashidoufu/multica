@@ -7,7 +7,6 @@ import {
   useTabStore,
 } from "@/stores/tab-store";
 import { useWindowOverlayStore, type WindowOverlay } from "@/stores/window-overlay-store";
-import type { RendererRouteContextInput } from "../../../shared/renderer-route-context";
 
 /**
  * Fires a PostHog $pageview whenever the user's visible surface changes,
@@ -17,7 +16,7 @@ import type { RendererRouteContextInput } from "../../../shared/renderer-route-c
  * Desktop has three layers that can own the visible page:
  *
  *   1. Logged-out state → `/login`. No workspace context, no tabs.
- *   2. Window overlays (onboarding, new-workspace, invite) → synthetic paths
+ *   2. Window overlays (new-workspace, invite) → synthetic paths
  *      that match the equivalent web routes. Overlays are NOT tab routes on
  *      desktop (see `stores/window-overlay-store.ts` + `routes.tsx`), so the
  *      tab path alone would either miss them or mislabel them as "/".
@@ -91,16 +90,6 @@ export function PageviewTracker() {
     const last = lastSurfaceRef.current;
     const next = { kind, key, path };
 
-    const routeContext: RendererRouteContextInput = {
-      surface: kind,
-      path,
-    };
-    if (kind === "tab") {
-      routeContext.workspaceSlug = activeWorkspaceSlug ?? undefined;
-      routeContext.tabId = activeTabId ?? undefined;
-    }
-    reportRendererRouteContext(routeContext);
-
     if (kind === "tab" && key !== null) {
       const knownPath = observed.get(key);
       const isReactivation =
@@ -121,13 +110,6 @@ export function PageviewTracker() {
   }, [user, overlay, activeWorkspaceSlug, activeTabId, activeTabPath]);
 
   return null;
-}
-
-function reportRendererRouteContext(context: RendererRouteContextInput) {
-  const desktopAPI = window.desktopAPI as
-    | { setRendererRouteContext?: (context: RendererRouteContextInput) => void }
-    | undefined;
-  desktopAPI?.setRendererRouteContext?.(context);
 }
 
 function overlayPath(overlay: WindowOverlay): string {

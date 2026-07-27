@@ -35,7 +35,6 @@ function WindowOverlayInner() {
   const close = useWindowOverlayStore((s) => s.close);
   const { push } = useNavigation();
   const { data: wsList = [] } = useQuery(workspaceListOptions());
-
   if (!overlay) return null;
 
   // Back is only meaningful when there's somewhere to go — i.e. the user

@@ -24,8 +24,8 @@ multica agent env get <agent-id> --output json  # plaintext env (owner/admin onl
 ```
 
 `agent get` returns the persisted agent including `runtime_id`, `model`,
-`thinking_level`, `custom_args`, `has_custom_env`, `custom_env_key_count`, and
-`skills`. It never returns plaintext `custom_env`.
+`thinking_level`, `service_tier`, `custom_args`, `has_custom_env`,
+`custom_env_key_count`, and `skills`. It never returns plaintext `custom_env`.
 
 ## Core model
 
@@ -58,13 +58,43 @@ multica agent create --name <name> --runtime-id <runtime-id> \
 `runAgentCreate` builds a JSON body and posts it to `/api/agents`. It only
 adds a key when its flag was provided — `description`/`instructions` on a
 non-empty value, the rest (`runtime-config`, `custom-args`, `model`,
-`thinking-level`, `visibility`, …) on the flag being `Changed` — so omitted
+`thinking-level`, `service-tier`, `visibility`, …) on the flag being `Changed` — so omitted
 flags fall through to server defaults rather than sending empty strings.
 
 The HTTP body (`CreateAgentRequest`) accepts: `name`, `description`,
 `instructions`, `avatar_url`, `runtime_id`, `runtime_config`, `custom_env`,
-`custom_args`, `model`, `thinking_level`, `visibility`,
-`max_concurrent_tasks`, `mcp_config`.
+`custom_args`, `model`, `thinking_level`, `service_tier`, `visibility`,
+`max_concurrent_tasks`, `mcp_config`, `skill_ids`.
+
+## Copying an agent
+
+`multica agent copy <source-agent-id>` forks an existing agent's portable
+configuration into a brand-new agent, leaving the source untouched. It is the
+CLI/headless equivalent of the web "Duplicate" action. No dedicated server API
+is involved: `runAgentCopy` reads the source with `GET /api/agents/<id>`, then
+POSTs a `CreateAgentRequest` — passing the source's skill ids in `skill_ids` so
+the bindings attach in the SAME create transaction (unlike `agent create`, which
+binds nothing). The mutation is therefore a single atomic create.
+
+```bash
+multica agent copy <source-agent-id> --name "My Agent (copy)"   # same runtime
+multica agent copy <source-agent-id> --runtime-id <target> --model <model>  # cross-runtime fork
+```
+
+- Copied by default, each overridable with the matching flag: `name` (suffixed
+  `" (copy)"`), `description`, `instructions`, avatar, `custom_args`,
+  `max_concurrent_tasks`, invocation permission (`permission_mode` +
+  allow-list), and assigned workspace skills.
+- Runtime-specific fields (`model`, `thinking_level`, `service_tier`) are copied
+  ONLY when the target runtime is unchanged. `--runtime-id` selecting a
+  different runtime drops them and REQUIRES `--model` (pass `--model ""` to
+  accept the target runtime default), mirroring the web Duplicate clearing model
+  on a runtime switch.
+- Never copied: `custom_env`, `mcp_config`, `runtime_config` (secret /
+  machine-local; redacted or masked on read anyway). Supply fresh values with
+  the same secret-safe flags as `agent create` (`--custom-env*`, `--mcp-config*`,
+  `--runtime-config`), or with `agent env set` after the copy exists.
+- `--no-skills` skips copying the source's skill bindings.
 
 ## Field contracts
 
@@ -77,6 +107,7 @@ The HTTP body (`CreateAgentRequest`) accepts: `name`, `description`,
 | `runtime_id` | `agent.runtime_id` | required (400) + must resolve to a runtime in this workspace | selects runtime/provider |
 | `model` | `agent.model` (nullable) | none beyond runtime support | daemon reads; empty = runtime default |
 | `thinking_level` | `agent.thinking_level` (nullable) | provider-level enum; unknown literal → 400 | daemon; empty = runtime default |
+| `service_tier` | `agent.service_tier` (nullable) | Codex-only safe token; other providers reject; exact model/tier pair checked by daemon | daemon → Codex app-server; empty = local Codex config |
 | `custom_args` | `agent.custom_args` (JSON array) | JSON shape checked CLI-side; server stores as-is | daemon (extra CLI switches); defaults to `[]` |
 | `runtime_config` | `agent.runtime_config` (JSON) | JSON shape checked CLI-side; server stores as-is | runtime-specific config; defaults to `{}` |
 | `custom_env` | `agent.custom_env` (JSON object) | — | daemon (process env); see Env & secrets |
@@ -107,6 +138,14 @@ model catalog). It forwards the token, the server applies the provider's
 fixed-enum or safe-token gate, and the daemon performs the exact model/level
 check. A runtime whose provider has no thinking concept rejects any non-empty
 value with a 400.
+
+`service_tier` is the matching first-class Codex speed control. Set it with
+`--service-tier <catalog-id>` on create/update; use `--service-tier ""` on
+update to clear it. The runtime model catalog owns both availability and
+display copy (currently `priority`, shown as Fast). The server accepts safe
+future Codex catalog IDs, while the daemon verifies the exact model/tier pair
+before execution and omits a stale incompatible override. Agents without an
+explicit model fail closed because the effective config.toml model is unknown.
 
 ### model vs custom_args
 
@@ -206,6 +245,8 @@ Read-only (safe): `agent get`, `agent skills list`, `agent env get`.
 State-changing (require an explicit instruction — do not run speculatively):
 
 - `multica agent create` — inserts a new agent row.
+- `multica agent copy` — inserts a new agent row (a fork of an existing agent);
+  the source is left untouched.
 - `multica agent skills add` / `set` — mutate bindings (`set` is destructive:
   it drops bindings not in the new list).
 - `multica agent env set` — overwrites the full `custom_env` map and writes an

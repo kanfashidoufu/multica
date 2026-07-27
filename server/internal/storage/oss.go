@@ -25,6 +25,8 @@ type OSSStorage struct {
 	publicBaseURL string
 }
 
+var _ Storage = (*OSSStorage)(nil)
+
 // NewOSSStorageFromEnv creates an OSSStorage from environment variables.
 // Returns nil if OSS_BUCKET is not set.
 //
@@ -130,16 +132,20 @@ func (s *OSSStorage) KeyFromURL(rawURL string) string {
 }
 
 func (s *OSSStorage) Delete(ctx context.Context, key string) {
+	if err := s.DeleteObject(ctx, key); err != nil {
+		slog.Error("oss DeleteObject failed", "key", key, "error", err)
+	}
+}
+
+func (s *OSSStorage) DeleteObject(ctx context.Context, key string) error {
 	if key == "" {
-		return
+		return nil
 	}
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	})
-	if err != nil {
-		slog.Error("oss DeleteObject failed", "key", key, "error", err)
-	}
+	return err
 }
 
 func (s *OSSStorage) DeleteKeys(ctx context.Context, keys []string) {
@@ -208,6 +214,10 @@ func (s *OSSStorage) Upload(ctx context.Context, key string, data []byte, conten
 		return "", fmt.Errorf("oss PutObject: %w", err)
 	}
 	return s.uploadedURL(key), nil
+}
+
+func (s *OSSStorage) ObjectURL(key string) string {
+	return s.uploadedURL(key)
 }
 
 func (s *OSSStorage) uploadedURL(key string) string {

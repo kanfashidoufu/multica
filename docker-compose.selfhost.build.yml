@@ -14,6 +14,8 @@ services:
 
   frontend:
     image: multica-web:dev
+    environment:
+      REMOTE_API_URL: ${REMOTE_API_URL:-https://qtb-multica-backend.lggj.work}
     build:
       context: .
       dockerfile: Dockerfile.web

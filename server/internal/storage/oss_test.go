@@ -77,6 +77,29 @@ func TestOSSStorageCdnDomain(t *testing.T) {
 	}
 }
 
+func TestOSSStorageObjectURL(t *testing.T) {
+	store := &OSSStorage{
+		bucket:        "multica-test",
+		region:        "cn-hangzhou",
+		publicBaseURL: "https://cdn.example.com",
+	}
+	if got := store.ObjectURL("workspaces/ws-1/file.png"); got != "https://cdn.example.com/workspaces/ws-1/file.png" {
+		t.Fatalf("ObjectURL with public base = %q", got)
+	}
+
+	store.publicBaseURL = ""
+	if got := store.ObjectURL("workspaces/ws-1/file.png"); got != "https://multica-test.oss-cn-hangzhou.aliyuncs.com/workspaces/ws-1/file.png" {
+		t.Fatalf("ObjectURL without public base = %q", got)
+	}
+}
+
+func TestOSSStorageDeleteObjectAllowsEmptyKey(t *testing.T) {
+	store := &OSSStorage{}
+	if err := store.DeleteObject(context.Background(), ""); err != nil {
+		t.Fatalf("DeleteObject with empty key: %v", err)
+	}
+}
+
 func TestOSSStoragePresignGet(t *testing.T) {
 	store := &OSSStorage{
 		client: s3.New(s3.Options{

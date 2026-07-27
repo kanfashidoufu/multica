@@ -56,6 +56,9 @@ var legacyDuplicateMigrationStems = map[string][]string{
 	"127": {"127_issue_pull_request_reference_only", "127_task_squad_id", "127_user_composio_connection"},
 	"128": {"128_agent_task_queue_runtime_mcp_overlay", "128_autopilot_collaborator", "128_comment_routing_escalation"},
 	"132": {"132_agent_task_queue_runtime_connected_apps", "132_issue_origin_type_external_issue_repair"},
+	// Keep upstream's published 157 name alongside the downstream migration
+	// that had already claimed the same prefix.
+	"157": {"157_agent_task_delivered_comments", "157_issue_origin_agent_create_external_issue_repair"},
 	// The downstream v0.3.43 release shipped agent_task_delivered_comments as
 	// 161 before upstream assigned the same numeric prefix to agent_skill_enabled.
 	// Migration identity is the full stem, so preserve this published pair.
