@@ -188,18 +188,17 @@ Without `GITHUB_APP_ID` and the private key, PRs still link, mirror, and trigger
 
 For setup steps, see [GitHub integration](/github-integration#self-hosting-setup), [Lark bot](/lark-bot-integration#self-hosting-setup), and [Slack bot](/slack-bot-integration#self-hosting-setup).
 
-### External issue import
+### Syndra external issue sync
 
-Set these when an external automation, such as Feishu Base automation, should create Multica issues through `POST /api/webhooks/external-issues`.
+Set these when Syndra sends bug or requirement events through `POST /api/webhooks/external-issues`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN` | empty | Shared secret required by the external issue import endpoint. Requests must send `Authorization: Bearer <token>`. When unset, the endpoint returns `503 external issue import is not configured` |
-| `MULTICA_EXTERNAL_ISSUE_DEFAULT_WORKSPACE_ID` | empty | Default workspace id used when the automation payload omits `workspace_id`. Feishu Base automation usually sends only `app_token`, `table_id`, and `record_id`, so set this for that flow |
-| `MULTICA_EXTERNAL_ISSUE_DEFAULT_LARK_USER_ID` | empty | Feishu/Lark `user_id` used as the default Multica member assignee and creator. The matching Lark account must already be linked to a Multica user who belongs to the target workspace |
-| `MULTICA_EXTERNAL_ISSUE_LARK_OPENAPI_TIMEOUT` | `30s` | Timeout for fetching the Feishu Base record; accepts a Go duration such as `45s` |
+| `MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN` | empty | Shared secret required by the sync endpoint. Requests must send `Authorization: Bearer <token>`. When unset, the endpoint returns `503 external issue sync is not configured` |
+| `MULTICA_EXTERNAL_BUG_WORKSPACE_ID` | empty | Dedicated workspace id used by `sync_type=bug`. Requests cannot override it |
+| `MULTICA_EXTERNAL_REQUIREMENT_WORKSPACE_ID` | empty | Dedicated workspace id used by `sync_type=requirement`. The request cannot override it, keeping requirement and bug workspaces isolated |
 
-For Feishu Base automation, send `app_token`, `table_id`, and `record_id` as HTTP parameters. Multica uses `LARK_APP_ID` and `LARK_APP_SECRET` to fetch the record, imports records whose `版本类型` is `小需求`, and uploads Base attachment fields as issue attachments. Imported issues start in `backlog` and use `origin_type=external_issue` for idempotency.
+Use `sync_type=bug` for the existing Syndra bug upsert flow. Bug sync resolves the assignee from the pushed name and falls back to the bug workspace owner when the name is missing or cannot uniquely match a member. Requirement sync uses `sync_type=requirement`, assigns the Multica agent from `executor_id`, and records that agent's owner as the issue creator. Former default-workspace/default-assignee variables and Feishu Base parameters are no longer supported.
 
 ## Release publishing
 

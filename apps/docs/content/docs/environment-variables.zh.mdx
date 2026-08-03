@@ -186,18 +186,17 @@ MULTICA_PUBLIC_URL=https://api.multica.example.com
 
 配置步骤见 [GitHub 集成](/github-integration#自托管配置)、[飞书 Bot](/lark-bot-integration#自托管配置)和 [Slack Bot](/slack-bot-integration#自托管配置)。
 
-### 外部 issue 导入
+### Syndra 外部 issue 同步
 
-飞书多维表格自动化等外部系统需要通过 `POST /api/webhooks/external-issues` 创建 Multica issue 时，配置下面这些变量。
+Syndra 通过 `POST /api/webhooks/external-issues` 推送 Bug 或小需求事件时，配置下面这些变量。
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN` | 空 | 接口要求的共享密钥。请求必须带 `Authorization: Bearer <token>`；不设置时返回 `503 external issue import is not configured` |
-| `MULTICA_EXTERNAL_ISSUE_DEFAULT_WORKSPACE_ID` | 空 | 请求未传 `workspace_id` 时使用的默认工作区 ID |
-| `MULTICA_EXTERNAL_ISSUE_DEFAULT_LARK_USER_ID` | 空 | 默认负责人和创建人对应的飞书/Lark `user_id`；该账号必须已绑定目标工作区中的 Multica 用户 |
-| `MULTICA_EXTERNAL_ISSUE_LARK_OPENAPI_TIMEOUT` | `30s` | 回查飞书 Base 记录的超时时间，使用 Go duration，例如 `45s` |
+| `MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN` | 空 | 同步接口要求的共享密钥。请求必须带 `Authorization: Bearer <token>`；不设置时返回 `503 external issue sync is not configured` |
+| `MULTICA_EXTERNAL_BUG_WORKSPACE_ID` | 空 | `sync_type=bug` 固定使用的 Bug 工作区 ID；不接受请求覆盖 |
+| `MULTICA_EXTERNAL_REQUIREMENT_WORKSPACE_ID` | 空 | `sync_type=requirement` 固定使用的小需求工作区 ID；不接受请求覆盖，确保与 Bug 工作区隔离 |
 
-飞书多维表格自动化的 HTTP 节点传入 `app_token`、`table_id`、`record_id`。Multica 使用 `LARK_APP_ID` 和 `LARK_APP_SECRET` 回查记录，只导入 `版本类型` 为 `小需求` 的数据，并把 Base 附件上传为 issue 附件。导入的 issue 默认进入 `backlog`，并以 `origin_type=external_issue` 保证幂等。
+现有 Syndra Bug upsert 流程使用 `sync_type=bug`。Bug 同步优先按推送的负责人名称匹配工作区成员；名称缺失或无法唯一匹配时，回退到 Bug 工作区的 owner（工作区创建人）。小需求同步使用 `sync_type=requirement`，由请求中的 `executor_id` 指派 Multica 智能体，并使用该智能体的负责人作为 issue 创建人；旧默认工作区、默认负责人环境变量和飞书多维表格参数不再支持。
 
 ## Release 发布
 

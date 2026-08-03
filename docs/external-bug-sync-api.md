@@ -6,7 +6,7 @@
 
 `POST https://<multica-api-host>/api/webhooks/external-issues?sync_type=bug`
 
-必须携带 `sync_type=bug`。没有该参数时，请求会继续走现有飞书需求导入逻辑。
+必须携带 `sync_type=bug`。飞书小需求导入已下线；缺少或传入不支持的 `sync_type` 会返回 `400`。Syndra 小需求请求请使用 `sync_type=requirement`，详见 [Syndra 小需求同步接口](./syndra-requirement-sync-api.md)。
 
 ## 鉴权与配置
 
@@ -22,15 +22,9 @@ Multica 侧需要配置：
 | 环境变量 | 说明 |
 |---|---|
 | `MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN` | webhook 鉴权 token |
-| `MULTICA_EXTERNAL_ISSUE_DEFAULT_WORKSPACE_ID` | 默认创建 issue 的 workspace UUID |
-| `MULTICA_EXTERNAL_ISSUE_DEFAULT_LARK_USER_ID` | 默认同步负责人，对应已绑定 Multica 成员的飞书 external user id/open id/union id |
+| `MULTICA_EXTERNAL_BUG_WORKSPACE_ID` | Bug 固定创建到的 workspace UUID |
 
-也可以用 query 覆盖：
-
-| Query | 说明 |
-|---|---|
-| `workspace_id` | 本次同步目标 workspace UUID |
-| `assignee_user_id` | 本次同步使用的默认负责人外部用户 ID |
+Bug 工作区不接受请求 Query 或 body 覆盖。`workspace_id` 和 `assignee_user_id` 参数不参与同步逻辑。
 
 ## 请求体
 
@@ -51,7 +45,7 @@ Multica 当前支持 `syndra.multica.version_bug.webhook.v1` 结构，按 `items
 | `items[].status/status_name` | 映射为 Multica issue 状态 |
 | `items[].bug_level/priority` | 映射为 Multica issue 优先级 |
 | `items[].bug_type_id/bug_type` | 写入 issue metadata |
-| `items[].creator/owner/assignee/solver` | 写入 issue metadata；创建 issue 时只用 `assignee.name` 精确匹配 Multica 用户名，匹配不到或不唯一时使用默认指派人，不使用 `mate_id` |
+| `items[].creator/owner/assignee/solver` | 写入 issue metadata；创建 issue 时使用 `assignee.name` 精确匹配 Bug 工作区中的唯一 Multica 用户，并把该用户作为 assignee 和 creator；也兼容 `bug_detail.assignee.name`。负责人名称缺失、匹配不到或不唯一时，统一回退到 Bug 工作区的 owner（工作区创建人）；不使用 `mate_id`，也不读取默认指派人环境变量 |
 | `items[].module` | 写入 issue metadata |
 | `items[].resolve_solution/resolve_solution_name` | 写入 issue metadata |
 | `items[].attachments/videos` | 当前记录数量到 metadata，暂不下载并绑定 Multica attachment |
@@ -182,6 +176,5 @@ curl -X POST 'https://<multica-api-host>/api/webhooks/external-issues?sync_type=
 | 状态码 | 场景 |
 |---:|---|
 | `401` | `Authorization` token 缺失或错误 |
-| `503` | Multica 未配置 webhook token 或外部导入未配置 |
+| `503` | Multica 未配置 webhook token、`MULTICA_EXTERNAL_BUG_WORKSPACE_ID`，或目标工作区没有可用的 owner |
 | `400` | JSON 请求体无效、workspace/record/title 缺失 |
-| `422` | 默认负责人未配置，或该负责人不是目标 workspace 成员 |

@@ -319,11 +319,29 @@ func TestCleanBugHTMLTextEscapesImageAltAndDropsUnsafeImageSources(t *testing.T)
 	}
 }
 
+func TestImportBugSyncRequiresDedicatedBugWorkspace(t *testing.T) {
+	importer := &Importer{
+		Queries:      &db.Queries{},
+		IssueService: &service.IssueService{},
+		Config: Config{
+			WebhookToken:                  "test-token",
+			DefaultWorkspaceID:            "11111111-1111-4111-8111-111111111111",
+			DefaultAssigneeExternalUserID: "deprecated-assignee",
+		},
+	}
+
+	_, err := importer.ImportBugSync(context.Background(), BugSyncRequest{})
+	if !errors.Is(err, ErrBugWorkspaceNotConfigured) {
+		t.Fatalf("error = %v, want ErrBugWorkspaceNotConfigured", err)
+	}
+}
+
 func TestImportBugSyncCreatesAndUpdatesIssue(t *testing.T) {
 	ctx := context.Background()
 	pool := openTestPool(t, ctx)
 	q := db.New(pool)
 	fx := createImporterFixture(t, ctx, pool, q)
+	bugAssignee := createImporterWorkspaceMember(t, ctx, pool, q, fx.Workspace.ID, "刘鹏", "")
 
 	bus := events.New()
 	importer := &Importer{
@@ -337,9 +355,8 @@ func TestImportBugSyncCreatesAndUpdatesIssue(t *testing.T) {
 		),
 		Bus: bus,
 		Config: Config{
-			WebhookToken:                  "test-token",
-			DefaultWorkspaceID:            util.UUIDToString(fx.Workspace.ID),
-			DefaultAssigneeExternalUserID: fx.ExternalUserID,
+			WebhookToken:   "test-token",
+			BugWorkspaceID: util.UUIDToString(fx.Workspace.ID),
 		},
 	}
 
@@ -427,7 +444,7 @@ func TestImportBugSyncCreatesAndUpdatesIssue(t *testing.T) {
 		metadata["syndra_role"] != "frontend" {
 		t.Fatalf("metadata = %#v", metadata)
 	}
-	assertAssigneeSubscribedAndInbox(t, ctx, q, pool, created.Issue.ID, fx.User.ID)
+	assertAssigneeSubscribedAndInbox(t, ctx, q, pool, created.Issue.ID, bugAssignee.User.ID)
 
 	payload.Items[0].Title = "【生成报告】iOS 16.1 白屏已定位"
 	payload.Items[0].Status = "resolved"
@@ -450,7 +467,7 @@ func TestImportBugSyncCreatesAndUpdatesIssue(t *testing.T) {
 	if metadataEvents < 2 {
 		t.Fatalf("metadata event count = %d, want at least 2", metadataEvents)
 	}
-	assertAssigneeInboxCount(t, ctx, pool, created.Issue.ID, fx.User.ID, 1)
+	assertAssigneeInboxCount(t, ctx, pool, created.Issue.ID, bugAssignee.User.ID, 1)
 }
 
 func TestImportBugSyncAssignsMappedBugAssignee(t *testing.T) {
@@ -472,9 +489,8 @@ func TestImportBugSyncAssignsMappedBugAssignee(t *testing.T) {
 		),
 		Bus: bus,
 		Config: Config{
-			WebhookToken:                  "test-token",
-			DefaultWorkspaceID:            util.UUIDToString(fx.Workspace.ID),
-			DefaultAssigneeExternalUserID: fx.ExternalUserID,
+			WebhookToken:   "test-token",
+			BugWorkspaceID: util.UUIDToString(fx.Workspace.ID),
 		},
 	}
 
@@ -509,6 +525,72 @@ func TestImportBugSyncAssignsMappedBugAssignee(t *testing.T) {
 	}
 	assertAssigneeSubscribedAndInbox(t, ctx, q, pool, issue.ID, bugAssignee.User.ID)
 	assertAssigneeInboxCount(t, ctx, pool, issue.ID, fx.User.ID, 0)
+}
+
+func TestImportBugSyncFallsBackToWorkspaceOwner(t *testing.T) {
+	ctx := context.Background()
+	pool := openTestPool(t, ctx)
+	q := db.New(pool)
+	fx := createImporterFixture(t, ctx, pool, q)
+
+	bus := events.New()
+	importer := &Importer{
+		Queries: q,
+		IssueService: service.NewIssueService(
+			q,
+			pool,
+			bus,
+			analytics.NoopClient{},
+			nil,
+		),
+		Bus: bus,
+		Config: Config{
+			WebhookToken:   "test-token",
+			BugWorkspaceID: util.UUIDToString(fx.Workspace.ID),
+		},
+	}
+
+	res, err := importer.ImportBugSync(ctx, BugSyncRequest{
+		Payload: BugSyncPayload{
+			Source:    "syndra",
+			SourceEnv: "local",
+			Items: []BugSyncItem{
+				{
+					Event:       "upsert",
+					EntityType:  "version_bug",
+					ExternalKey: "syndra:local:version_bug:owner-fallback-missing",
+					BugID:       1082,
+					Title:       "缺少负责人时回退工作区所有者",
+					Status:      "active",
+				},
+				{
+					Event:       "upsert",
+					EntityType:  "version_bug",
+					ExternalKey: "syndra:local:version_bug:owner-fallback-unmatched",
+					BugID:       1083,
+					Title:       "负责人未匹配时回退工作区所有者",
+					Status:      "active",
+					Assignee:    BugSyncPerson{Name: strPtr("不存在的负责人")},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ImportBugSync: %v", err)
+	}
+	if len(res.Items) != 2 {
+		t.Fatalf("items len = %d, want 2", len(res.Items))
+	}
+	for _, item := range res.Items {
+		issue := item.Issue
+		if issue.AssigneeType.String != "member" || issue.AssigneeID != fx.User.ID {
+			t.Fatalf("assignee = (%q, %s), want workspace owner %s", issue.AssigneeType.String, util.UUIDToString(issue.AssigneeID), util.UUIDToString(fx.User.ID))
+		}
+		if issue.CreatorID != fx.User.ID {
+			t.Fatalf("creator = %s, want workspace owner %s", util.UUIDToString(issue.CreatorID), util.UUIDToString(fx.User.ID))
+		}
+		assertAssigneeSubscribedAndInbox(t, ctx, q, pool, issue.ID, fx.User.ID)
+	}
 }
 
 func TestImportFetchesLarkRecordWhenAutomationSendsOnlyRecordIDs(t *testing.T) {

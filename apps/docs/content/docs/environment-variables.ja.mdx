@@ -277,28 +277,17 @@ multica config show
 | `METRICS_ADDR` | 空 | Prometheus metrics のリッスンアドレス。空なら起動しません |
 | `REALTIME_METRICS_TOKEN` | 空 | `/health/realtime` を保護する bearer token |
 
-## 外部 issue インポート
+## Syndra 外部 issue 同期
 
-Feishu Base automation などの外部 automation が `POST /api/webhooks/external-issues` で Multica issue を作成する場合に設定します。
+Syndra が `POST /api/webhooks/external-issues` に Bug または小規模要件イベントを送信する場合に設定します。
 
 | 変数 | デフォルト | 説明 |
 |---|---|---|
-| `MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN` | 空 | 外部 issue import エンドポイントで必須の共有 secret。リクエストは `Authorization: Bearer <token>` を送信する必要があります。未設定の場合、エンドポイントは `503 external issue import is not configured` を返します |
-| `MULTICA_EXTERNAL_ISSUE_DEFAULT_WORKSPACE_ID` | 空 | automation payload が `workspace_id` を省略した場合に使うデフォルト workspace id。Feishu Base automation は通常 `app_token`、`table_id`、`record_id` だけを送るため、この flow では設定してください |
-| `MULTICA_EXTERNAL_ISSUE_DEFAULT_LARK_USER_ID` | 空 | デフォルトの Multica member assignee / creator として使う Feishu/Lark `user_id`。該当する Lark アカウントは、対象 workspace の Multica ユーザーに既にリンクされている必要があります |
-| `MULTICA_EXTERNAL_ISSUE_LARK_OPENAPI_TIMEOUT` | `30s` | Feishu Base record を取得するときの timeout。`45s` などの Go duration を使用します |
+| `MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN` | 空 | 同期エンドポイントで必須の共有 secret。リクエストは `Authorization: Bearer <token>` を送信する必要があります。未設定の場合、エンドポイントは `503 external issue sync is not configured` を返します |
+| `MULTICA_EXTERNAL_BUG_WORKSPACE_ID` | 空 | `sync_type=bug` 専用の workspace id。リクエストからは上書きできません |
+| `MULTICA_EXTERNAL_REQUIREMENT_WORKSPACE_ID` | 空 | `sync_type=requirement` 専用の workspace id。リクエストからは上書きできず、要件と Bug の workspace を分離します |
 
-Feishu Base automation の HTTP step Params は次のように設定できます。
-
-| Param | 値 |
-|---|---|
-| `app_token` | Feishu automation の Base app token |
-| `table_id` | Feishu automation の table id |
-| `record_id` | Feishu automation の record id |
-
-Multica は Lark login app の `LARK_APP_ID` と `LARK_APP_SECRET` を使って該当 Base record を取得し、`版本类型` が `小需求` の record だけを import します。issue description には `需求名称`、`产品经理`、`备注`、source URL が入ります。添付は Feishu Base attachment field の `file_token`、`name`、`size`、`type`、`url`、`tmp_url` から読み取り、issue attachment としてアップロードします。
-
-インポートされた issue は `backlog` に作成され、`origin_type=external_issue` で冪等化されます。同じ外部 record の retry は重複作成せず、既存 issue を返します。
+既存の Syndra Bug upsert フローには `sync_type=bug` を使用します。Bug 同期は送信された担当者名で workspace member を検索し、名前がない場合や一意に一致しない場合は Bug workspace の owner（workspace 作成者）にフォールバックします。小規模要件同期は `sync_type=requirement` を使用し、`executor_id` の Multica Agent を割り当て、その Agent の owner を issue creator として記録します。旧デフォルト workspace/assignee 変数と Feishu Base パラメータはサポートされません。
 
 ## 次のステップ
 

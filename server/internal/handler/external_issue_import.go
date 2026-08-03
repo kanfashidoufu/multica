@@ -7,19 +7,15 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
-	"time"
 
-	enterpriseLark "github.com/multica-ai/multica/server/internal/enterprise/lark"
 	"github.com/multica-ai/multica/server/internal/externalissue"
 	"github.com/multica-ai/multica/server/internal/logger"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 func (h *Handler) ImportExternalIssue(w http.ResponseWriter, r *http.Request) {
-	larkCfg := enterpriseLark.ConfigFromEnv()
 	buildIssueResponse := func(ctx context.Context, issue db.Issue, attachments []db.Attachment) IssueResponse {
 		prefix := h.getIssuePrefix(ctx, issue.WorkspaceID)
 		resp := issueToResponse(issue, prefix)
@@ -32,73 +28,31 @@ func (h *Handler) ImportExternalIssue(w http.ResponseWriter, r *http.Request) {
 		return resp
 	}
 	importer := &externalissue.Importer{
-		Queries:           h.Queries,
-		IssueService:      h.IssueService,
-		Storage:           h.Storage,
-		LarkInstallations: h.LarkInstallations,
-		LarkAPIClient:     h.LarkAPIClient,
-		Bus:               h.Bus,
+		Queries:      h.Queries,
+		IssueService: h.IssueService,
+		Bus:          h.Bus,
 		BroadcastPayload: func(ctx context.Context, issue db.Issue, attachments []db.Attachment) map[string]any {
 			return map[string]any{"issue": buildIssueResponse(ctx, issue, attachments)}
 		},
 		Logger: slog.Default(),
 		Config: externalissue.Config{
-			WebhookToken:                  os.Getenv("MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN"),
-			DefaultWorkspaceID:            os.Getenv("MULTICA_EXTERNAL_ISSUE_DEFAULT_WORKSPACE_ID"),
-			DefaultAssigneeExternalUserID: os.Getenv("MULTICA_EXTERNAL_ISSUE_DEFAULT_LARK_USER_ID"),
-			LarkAppID:                     larkCfg.AppID,
-			LarkAppSecret:                 larkCfg.AppSecret,
-			LarkOpenAPIBaseURL:            strings.TrimSpace(os.Getenv("MULTICA_LARK_HTTP_BASE_URL")),
-			LarkOpenAPITimeout:            externalIssueDurationEnv("MULTICA_EXTERNAL_ISSUE_LARK_OPENAPI_TIMEOUT"),
+			WebhookToken:           os.Getenv("MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN"),
+			BugWorkspaceID:         os.Getenv("MULTICA_EXTERNAL_BUG_WORKSPACE_ID"),
+			RequirementWorkspaceID: os.Getenv("MULTICA_EXTERNAL_REQUIREMENT_WORKSPACE_ID"),
 		},
 	}
 	if err := importer.VerifyToken(r.Header.Get("Authorization")); err != nil {
 		writeExternalImportError(w, err)
 		return
 	}
-	if isExternalBugSyncProbe(r.URL.Query()) {
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sync_type"))) {
+	case "bug":
 		handleExternalBugSync(w, r, importer, buildIssueResponse)
-		return
+	case "requirement":
+		handleExternalRequirementSync(w, r, importer, buildIssueResponse)
+	default:
+		writeError(w, http.StatusBadRequest, "unsupported external issue sync_type")
 	}
-
-	req, err := decodeExternalIssueImportRequest(r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	res, err := importer.Import(r.Context(), req)
-	if err != nil {
-		slog.Warn("external issue import failed", append(logger.RequestAttrs(r), "error", err)...)
-		writeExternalImportError(w, err)
-		return
-	}
-	if res.Ignored {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"status":           "ignored",
-			"reason":           res.Reason,
-			"provider":         res.Provider,
-			"source_record_id": res.SourceRecordID,
-		})
-		return
-	}
-
-	resp := buildIssueResponse(r.Context(), res.Issue, res.Attachments)
-	status := http.StatusCreated
-	if res.Existing {
-		status = http.StatusOK
-	}
-	writeJSON(w, status, map[string]any{
-		"status":            "synced",
-		"existing":          res.Existing,
-		"provider":          res.Provider,
-		"source_record_id":  res.SourceRecordID,
-		"issue":             resp,
-		"attachment_errors": res.AttachmentErrors,
-	})
-}
-
-func isExternalBugSyncProbe(values url.Values) bool {
-	return strings.EqualFold(strings.TrimSpace(values.Get("sync_type")), "bug")
 }
 
 func handleExternalBugSync(w http.ResponseWriter, r *http.Request, importer *externalissue.Importer, buildIssueResponse func(context.Context, db.Issue, []db.Attachment) IssueResponse) {
@@ -190,6 +144,60 @@ func logExternalBugSyncRequestBody(r *http.Request) error {
 	return nil
 }
 
+func handleExternalRequirementSync(w http.ResponseWriter, r *http.Request, importer *externalissue.Importer, buildIssueResponse func(context.Context, db.Issue, []db.Attachment) IssueResponse) {
+	_, err := logExternalRequirementSyncRequestBody(r)
+	if err != nil {
+		slog.Warn("external requirement sync request body read failed",
+			append(logger.RequestAttrs(r), "error", err)...)
+		writeError(w, http.StatusBadRequest, "invalid requirement sync request body")
+		return
+	}
+	payload, err := externalissue.DecodeRequirementSyncRequest(r.Body)
+	if err != nil {
+		slog.Warn("external requirement sync decode failed",
+			append(logger.RequestAttrs(r), "error", err)...)
+		writeError(w, http.StatusBadRequest, "invalid requirement sync request body")
+		return
+	}
+	res, err := importer.ImportRequirementSync(r.Context(), payload)
+	if err != nil {
+		slog.Warn("external requirement sync failed", append(logger.RequestAttrs(r), "error", err)...)
+		writeExternalImportError(w, err)
+		return
+	}
+
+	status := http.StatusOK
+	if !res.Existing {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, map[string]any{
+		"status":               "synced",
+		"sync_type":            "requirement",
+		"provider":             res.Provider,
+		"existing":             res.Existing,
+		"source_record_id":     res.SourceRecordID,
+		"product_iteration_id": res.ProductIterationID,
+		"project_record_url":   res.ProjectRecordURL,
+		"issue":                buildIssueResponse(r.Context(), res.Issue, nil),
+	})
+}
+
+func logExternalRequirementSyncRequestBody(r *http.Request) (int, error) {
+	if r.Body == nil {
+		slog.Info("external syndra requirement sync request body received",
+			append(logger.RequestAttrs(r), "request_body_bytes", 0, "request_body", "")...)
+		return 0, nil
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return 0, err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	slog.Info("external syndra requirement sync request body received",
+		append(logger.RequestAttrs(r), "request_body_bytes", len(body), "request_body", string(body))...)
+	return len(body), nil
+}
+
 func decodeExternalBugSyncRequest(r *http.Request) (externalissue.BugSyncRequest, error) {
 	var req externalissue.BugSyncRequest
 	if r.Body == nil {
@@ -200,46 +208,7 @@ func decodeExternalBugSyncRequest(r *http.Request) (externalissue.BugSyncRequest
 		return req, err
 	}
 	req.Payload = payload
-	setStringParam(r.URL.Query(), "workspace_id", &req.WorkspaceID)
-	setStringParam(r.URL.Query(), "assignee_user_id", &req.AssigneeUserID)
 	return req, nil
-}
-
-func decodeExternalIssueImportRequest(r *http.Request) (externalissue.Request, error) {
-	var req externalissue.Request
-	if r.Body != nil && r.ContentLength != 0 {
-		var err error
-		req, err = externalissue.DecodeRequest(r.Body)
-		if err != nil && !errors.Is(err, io.EOF) {
-			return req, err
-		}
-	}
-	applyExternalIssueQueryParams(&req, r.URL.Query())
-	return req, nil
-}
-
-func applyExternalIssueQueryParams(req *externalissue.Request, values url.Values) {
-	setStringParam(values, "provider", &req.Provider)
-	setStringParam(values, "source", &req.Source)
-	setStringParam(values, "workspace_id", &req.WorkspaceID)
-	setStringParam(values, "installation_id", &req.InstallationID)
-	setStringParam(values, "app_token", &req.AppToken)
-	setStringParam(values, "base_token", &req.BaseToken)
-	setStringParam(values, "table_id", &req.TableID)
-	setStringParam(values, "view_id", &req.ViewID)
-	setStringParam(values, "record_id", &req.RecordID)
-	setStringParam(values, "record_url", &req.RecordURL)
-	setStringParam(values, "target_type", &req.TargetType)
-	setStringParam(values, "assignee_user_id", &req.AssigneeUserID)
-	if strings.EqualFold(strings.TrimSpace(values.Get("allow_duplicate")), "true") {
-		req.AllowDuplicate = true
-	}
-}
-
-func setStringParam(values url.Values, key string, target *string) {
-	if v := strings.TrimSpace(values.Get(key)); v != "" {
-		*target = v
-	}
 }
 
 func writeExternalImportError(w http.ResponseWriter, err error) {
@@ -247,32 +216,32 @@ func writeExternalImportError(w http.ResponseWriter, err error) {
 	case errors.Is(err, externalissue.ErrUnauthorized):
 		writeError(w, http.StatusUnauthorized, "invalid external issue webhook token")
 	case errors.Is(err, externalissue.ErrNotConfigured):
-		writeError(w, http.StatusServiceUnavailable, "external issue import is not configured")
+		writeError(w, http.StatusServiceUnavailable, "external issue sync is not configured")
+	case errors.Is(err, externalissue.ErrRequirementWorkspaceNotConfigured):
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, externalissue.ErrBugWorkspaceNotConfigured):
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, externalissue.ErrBugWorkspaceOwnerNotFound):
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, externalissue.ErrMissingWorkspaceID),
 		errors.Is(err, externalissue.ErrMissingRecordID),
 		errors.Is(err, externalissue.ErrMissingTitle),
-		errors.Is(err, externalissue.ErrMissingLarkRecordParams):
+		errors.Is(err, externalissue.ErrMissingExecutionPrompt),
+		errors.Is(err, externalissue.ErrMissingExecutorID),
+		errors.Is(err, externalissue.ErrInvalidExecutorID),
+		errors.Is(err, externalissue.ErrMissingRequirementOwnerID),
+		errors.Is(err, externalissue.ErrMissingProductIterationID),
+		errors.Is(err, externalissue.ErrMissingProjectRecordURL):
 		writeError(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, externalissue.ErrLarkAppNotConfigured):
-		writeError(w, http.StatusServiceUnavailable, err.Error())
-	case errors.Is(err, externalissue.ErrLarkOpenAPITimeout):
-		writeError(w, http.StatusGatewayTimeout, err.Error())
 	case errors.Is(err, externalissue.ErrMissingDefaultAssignee),
-		errors.Is(err, externalissue.ErrDefaultAssigneeNotMember):
+		errors.Is(err, externalissue.ErrDefaultAssigneeNotMember),
+		errors.Is(err, externalissue.ErrRequirementExecutorNotFound),
+		errors.Is(err, externalissue.ErrRequirementOwnerNotMember),
+		errors.Is(err, externalissue.ErrRequirementAgentNotReady):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, externalissue.ErrRequirementExecutorConflict):
+		writeError(w, http.StatusConflict, err.Error())
 	default:
-		writeError(w, http.StatusInternalServerError, "failed to import external issue")
+		writeError(w, http.StatusInternalServerError, "failed to sync external issue")
 	}
-}
-
-func externalIssueDurationEnv(key string) time.Duration {
-	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" {
-		return 0
-	}
-	v, err := time.ParseDuration(raw)
-	if err != nil || v <= 0 {
-		return 0
-	}
-	return v
 }

@@ -59,17 +59,19 @@ const (
 )
 
 var (
-	ErrUnauthorized             = errors.New("external issue import token is invalid")
-	ErrNotConfigured            = errors.New("external issue import is not configured")
-	ErrMissingWorkspaceID       = errors.New("workspace_id is required")
-	ErrMissingDefaultAssignee   = errors.New("default assignee external user id is not configured")
-	ErrDefaultAssigneeNotMember = errors.New("default assignee is not a member of this workspace")
-	ErrMissingRecordID          = errors.New("external record id is required")
-	ErrMissingTitle             = errors.New("external issue title is required")
-	ErrStorageNotConfigured     = errors.New("attachment storage is not configured")
-	ErrMissingLarkRecordParams  = errors.New("app_token, table_id, and record_id are required when fields are omitted")
-	ErrLarkAppNotConfigured     = errors.New("Lark app credentials are not configured")
-	ErrLarkOpenAPITimeout       = errors.New("Lark OpenAPI request timed out")
+	ErrUnauthorized              = errors.New("external issue import token is invalid")
+	ErrNotConfigured             = errors.New("external issue sync is not configured")
+	ErrMissingWorkspaceID        = errors.New("workspace_id is required")
+	ErrBugWorkspaceNotConfigured = errors.New("Syndra bug workspace is not configured")
+	ErrBugWorkspaceOwnerNotFound = errors.New("Syndra bug workspace owner is not available")
+	ErrMissingDefaultAssignee    = errors.New("default assignee external user id is not configured")
+	ErrDefaultAssigneeNotMember  = errors.New("default assignee is not a member of this workspace")
+	ErrMissingRecordID           = errors.New("external record id is required")
+	ErrMissingTitle              = errors.New("external issue title is required")
+	ErrStorageNotConfigured      = errors.New("attachment storage is not configured")
+	ErrMissingLarkRecordParams   = errors.New("app_token, table_id, and record_id are required when fields are omitted")
+	ErrLarkAppNotConfigured      = errors.New("Lark app credentials are not configured")
+	ErrLarkOpenAPITimeout        = errors.New("Lark OpenAPI request timed out")
 )
 
 var (
@@ -82,6 +84,8 @@ var (
 type Config struct {
 	WebhookToken                  string
 	DefaultWorkspaceID            string
+	BugWorkspaceID                string
+	RequirementWorkspaceID        string
 	DefaultAssigneeExternalUserID string
 	LarkAppID                     string
 	LarkAppSecret                 string
@@ -95,6 +99,8 @@ type Config struct {
 func (c Config) withDefaults() Config {
 	c.WebhookToken = strings.TrimSpace(c.WebhookToken)
 	c.DefaultWorkspaceID = strings.TrimSpace(c.DefaultWorkspaceID)
+	c.BugWorkspaceID = strings.TrimSpace(c.BugWorkspaceID)
+	c.RequirementWorkspaceID = strings.TrimSpace(c.RequirementWorkspaceID)
 	c.DefaultAssigneeExternalUserID = strings.TrimSpace(c.DefaultAssigneeExternalUserID)
 	c.LarkAppID = strings.TrimSpace(c.LarkAppID)
 	c.LarkAppSecret = strings.TrimSpace(c.LarkAppSecret)
@@ -153,9 +159,7 @@ type Request struct {
 }
 
 type BugSyncRequest struct {
-	WorkspaceID    string
-	AssigneeUserID string
-	Payload        BugSyncPayload
+	Payload BugSyncPayload
 }
 
 type BugSyncPayload struct {
@@ -617,46 +621,24 @@ func (i *Importer) ImportBugSync(ctx context.Context, req BugSyncRequest) (BugSy
 		return BugSyncResult{}, errors.New("external issue importer is not wired")
 	}
 
-	workspaceIDRaw := firstNonEmpty(req.WorkspaceID, cfg.DefaultWorkspaceID)
-	if workspaceIDRaw == "" {
+	if cfg.BugWorkspaceID == "" {
 		i.warn("external bug sync: workspace missing",
 			"provider", bugProvider(req.Payload),
 			"event_id", req.Payload.EventID,
 			"source_env", req.Payload.SourceEnv,
 			"item_count", len(req.Payload.Items),
 		)
-		return BugSyncResult{}, ErrMissingWorkspaceID
+		return BugSyncResult{}, ErrBugWorkspaceNotConfigured
 	}
-	workspaceID, err := util.ParseUUID(workspaceIDRaw)
+	workspaceID, err := util.ParseUUID(cfg.BugWorkspaceID)
 	if err != nil {
 		i.warn("external bug sync: workspace invalid",
 			"provider", bugProvider(req.Payload),
-			"workspace_id", workspaceIDRaw,
+			"workspace_id", cfg.BugWorkspaceID,
 			"event_id", req.Payload.EventID,
 			"error", err,
 		)
-		return BugSyncResult{}, ErrMissingWorkspaceID
-	}
-
-	defaultUserID := firstNonEmpty(strings.TrimSpace(req.AssigneeUserID), cfg.DefaultAssigneeExternalUserID)
-	if defaultUserID == "" {
-		i.warn("external bug sync: default assignee missing",
-			"provider", bugProvider(req.Payload),
-			"workspace_id", util.UUIDToString(workspaceID),
-			"event_id", req.Payload.EventID,
-		)
-		return BugSyncResult{}, ErrMissingDefaultAssignee
-	}
-	defaultAssignee, err := i.resolveMemberByExternalUserID(ctx, workspaceID, defaultUserID)
-	if err != nil {
-		i.warn("external bug sync: default assignee resolve failed",
-			"provider", bugProvider(req.Payload),
-			"workspace_id", util.UUIDToString(workspaceID),
-			"event_id", req.Payload.EventID,
-			"assignee_user_id", defaultUserID,
-			"error", err,
-		)
-		return BugSyncResult{}, err
+		return BugSyncResult{}, fmt.Errorf("%w: invalid workspace UUID", ErrBugWorkspaceNotConfigured)
 	}
 
 	provider := bugProvider(req.Payload)
@@ -680,7 +662,7 @@ func (i *Importer) ImportBugSync(ctx context.Context, req BugSyncRequest) (BugSy
 			"event", item.Event,
 			"entity_type", item.EntityType,
 		)
-		assignee, err := i.resolveBugAssigneeMember(ctx, workspaceID, item, defaultAssignee)
+		assignee, fallbackReason, err := i.resolveBugAssigneeMember(ctx, workspaceID, item)
 		if err != nil {
 			i.warn("external bug sync: item assignee resolve failed",
 				"provider", provider,
@@ -692,6 +674,18 @@ func (i *Importer) ImportBugSync(ctx context.Context, req BugSyncRequest) (BugSy
 			)
 			return result, err
 		}
+		if fallbackReason != "" {
+			i.warn("external bug sync: item assignee fell back to workspace owner",
+				"provider", provider,
+				"workspace_id", util.UUIDToString(workspaceID),
+				"record_id", recordID,
+				"external_key", item.ExternalKey,
+				"bug_id", item.BugID,
+				"pushed_assignee_name", bugPersonName(bugAssigneePerson(item)),
+				"fallback_reason", fallbackReason,
+				"owner_user_id", util.UUIDToString(assignee.UserID),
+			)
+		}
 		i.info("external bug sync: item assignee resolved",
 			"provider", provider,
 			"workspace_id", util.UUIDToString(workspaceID),
@@ -699,7 +693,8 @@ func (i *Importer) ImportBugSync(ctx context.Context, req BugSyncRequest) (BugSy
 			"external_key", item.ExternalKey,
 			"bug_id", item.BugID,
 			"assignee_id", util.UUIDToString(assignee.UserID),
-			"used_default_assignee", assignee.UserID == defaultAssignee.UserID,
+			"assignee_name", bugPersonName(bugAssigneePerson(item)),
+			"used_workspace_owner_fallback", fallbackReason != "",
 		)
 		itemResult, err := i.importBugSyncItem(ctx, req.Payload, item, workspaceID, assignee.UserID)
 		if err != nil {
@@ -2106,18 +2101,48 @@ func (i *Importer) resolveMemberByExternalUserID(ctx context.Context, workspaceI
 	return member, nil
 }
 
-func (i *Importer) resolveBugAssigneeMember(ctx context.Context, workspaceID pgtype.UUID, item BugSyncItem, defaultAssignee db.Member) (db.Member, error) {
+func (i *Importer) resolveBugAssigneeMember(ctx context.Context, workspaceID pgtype.UUID, item BugSyncItem) (db.Member, string, error) {
 	person := bugAssigneePerson(item)
-	if name := bugPersonName(person); name != "" {
+	name := bugPersonName(person)
+	fallbackReason := "missing_assignee_name"
+	if name != "" {
 		member, ok, err := i.lookupUniqueMemberByName(ctx, workspaceID, name)
 		if err != nil {
-			return db.Member{}, err
+			return db.Member{}, "", err
 		}
 		if ok {
-			return member, nil
+			return member, "", nil
 		}
+		fallbackReason = "assignee_not_unique_or_not_member"
 	}
-	return defaultAssignee, nil
+
+	owner, err := i.lookupWorkspaceOwner(ctx, workspaceID)
+	if err != nil {
+		return db.Member{}, fallbackReason, err
+	}
+	return owner, fallbackReason, nil
+}
+
+func (i *Importer) lookupWorkspaceOwner(ctx context.Context, workspaceID pgtype.UUID) (db.Member, error) {
+	members, err := i.Queries.ListMembersWithUser(ctx, workspaceID)
+	if err != nil {
+		return db.Member{}, err
+	}
+	// ListMembersWithUser is ordered by creation time, so this chooses the
+	// workspace creator when the owner role has remained intact.
+	for _, member := range members {
+		if member.Role != "owner" {
+			continue
+		}
+		return db.Member{
+			ID:          member.ID,
+			WorkspaceID: member.WorkspaceID,
+			UserID:      member.UserID,
+			Role:        member.Role,
+			CreatedAt:   member.CreatedAt,
+		}, nil
+	}
+	return db.Member{}, ErrBugWorkspaceOwnerNotFound
 }
 
 func (i *Importer) lookupMemberByExternalIdentity(ctx context.Context, workspaceID pgtype.UUID, externalUserID string) (db.Member, error) {
