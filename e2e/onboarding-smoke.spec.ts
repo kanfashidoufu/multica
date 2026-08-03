@@ -1,74 +1,61 @@
 import { test, expect } from "@playwright/test";
 import { TestApiClient } from "./fixtures";
-import { waitForPageText } from "./helpers";
 
-// Smoke test for the onboarding flow: welcome → About you (role +
-// use case on ONE screen) → workspace → runtime. The source question
-// is intentionally absent — it moved to the workspace source-backfill
-// prompt (MUL-5159). Captures screenshots for review. Uses a unique
-// email per run so the user is always a fresh, un-onboarded user
-// landing on /onboarding.
-
-const EMAIL = `onboarding-v3-${Date.now()}@localhost`;
-const SHOTS_DIR = "/tmp/onboarding-v3-shots";
+// The local/self-host build intentionally sends a signed-in user with no
+// workspaces straight to workspace creation. The hosted questionnaire is not
+// a routing gate in this distribution.
 
 test.use({ viewport: { width: 1440, height: 900 } });
 
-test("onboarding — welcome → about you (answer path)", async ({ page }) => {
+test("onboarding — zero-workspace users land on workspace creation", async ({
+  page,
+}) => {
   const api = new TestApiClient();
-  await api.login(EMAIL, "OBv3 Tester");
+  await api.login(`onboarding-local-${Date.now()}@localhost`, "Local Tester");
   const token = api.getToken();
 
   await page.addInitScript((t) => {
     localStorage.setItem("multica_token", t);
   }, token);
   await page.goto("/onboarding", { waitUntil: "domcontentloaded" });
-  await waitForPageText(page, "Continue on web");
+  await expect(page).toHaveURL(/\/workspaces\/new/);
+  await expect(
+    page.getByRole("heading", { name: "Welcome to Multica" }),
+  ).toBeVisible({ timeout: 15000 });
 
-  // 1. Welcome screen
-  await expect(page.getByRole("button", { name: "Continue on web" })).toBeVisible({ timeout: 15000 });
-  await page.screenshot({ path: `${SHOTS_DIR}/01-welcome.png`, fullPage: false });
+  const nameInput = page.getByRole("textbox", { name: "Workspace Name" });
+  const slugInput = page.getByRole("textbox", { name: "Workspace URL" });
+  const createButton = page.getByRole("button", { name: "Create workspace" });
+  await expect(createButton).toBeDisabled();
 
-  // Click Continue on web to advance to About you
-  await page.getByRole("button", { name: "Continue on web" }).click();
-
-  // 2. About you step — both questions live on this one screen and the
-  //    source question must NOT exist anywhere in the flow.
-  await expect(page.getByText("Tell us a bit about you.")).toBeVisible({ timeout: 10000 });
-  await expect(page.getByText("Which best describes you?")).toBeVisible();
-  await expect(page.getByText("What do you want to use Multica for?")).toBeVisible();
-  await expect(page.getByText(/Step 1 of 3/)).toBeVisible();
-  await expect(page.getByText("How did you hear about Multica?")).toHaveCount(0);
-  await page.waitForTimeout(500);
-  await page.screenshot({ path: `${SHOTS_DIR}/02-about-you.png` });
-
-  // Answer both groups, then Continue → workspace step.
-  await page.getByRole("radio", { name: /Engineer \/ developer/i }).click();
-  await page.getByRole("checkbox", { name: /Ship code with AI agents/i }).click();
-  await page.getByRole("button", { name: "Continue" }).click();
-
-  // 3. Workspace step
-  await expect(page.getByRole("heading", { name: /Name your workspace/i })).toBeVisible({ timeout: 10000 });
-  await expect(page.getByText(/Step 2 of 3/)).toBeVisible();
-  await page.screenshot({ path: `${SHOTS_DIR}/03-workspace.png` });
+  await nameInput.fill(`Onboarding Workspace ${Date.now()}`);
+  await expect(slugInput).toHaveValue(/^onboarding-workspace-\d+$/);
+  await expect(createButton).toBeEnabled();
+  await expect(page.getByText("Tell us a bit about you.")).toHaveCount(0);
 });
 
-test("onboarding — one skip clears the whole questionnaire step", async ({ page }) => {
+test("onboarding — an edited local workspace URL is preserved", async ({
+  page,
+}) => {
   const api = new TestApiClient();
-  await api.login(`skip-${Date.now()}@localhost`, "Skipper");
+  await api.login(`workspace-url-${Date.now()}@localhost`, "URL Tester");
   const token = api.getToken();
 
   await page.addInitScript((t) => localStorage.setItem("multica_token", t), token);
   await page.goto("/onboarding", { waitUntil: "domcontentloaded" });
-  await waitForPageText(page, "Continue on web");
+  await expect(page).toHaveURL(/\/workspaces\/new/);
 
-  await page.getByRole("button", { name: "Continue on web" }).click();
-  await expect(page.getByText("Tell us a bit about you.")).toBeVisible({ timeout: 10000 });
-
-  // A single Skip covers role + use case — next stop is workspace.
-  await page.getByRole("button", { name: "Skip" }).click();
-  await expect(page.getByRole("heading", { name: /Name your workspace/i })).toBeVisible({ timeout: 10000 });
-  await page.screenshot({ path: `${SHOTS_DIR}/04-after-skip.png` });
+  const nameInput = page.getByRole("textbox", { name: "Workspace Name" });
+  const slugInput = page.getByRole("textbox", { name: "Workspace URL" });
+  await nameInput.fill("Initial Workspace");
+  await expect(slugInput).toHaveValue("initial-workspace");
+  await slugInput.fill("custom-local-workspace");
+  await nameInput.fill("Renamed Workspace");
+  await expect(slugInput).toHaveValue("custom-local-workspace");
+  await expect(
+    page.getByRole("button", { name: "Continue on web" }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Skip" })).toHaveCount(0);
 });
 
 test("onboarding — zh-Hans renders Chinese labels", async ({ page, context }) => {
@@ -79,15 +66,23 @@ test("onboarding — zh-Hans renders Chinese labels", async ({ page, context }) 
   await api.login(`zh-${Date.now()}@localhost`, "中文用户");
   const token = api.getToken();
 
-  await page.addInitScript((t) => localStorage.setItem("multica_token", t), token);
+  await page.addInitScript(
+    (t) => localStorage.setItem("multica_token", t),
+    token,
+  );
   await page.goto("/onboarding", { waitUntil: "domcontentloaded" });
-  await waitForPageText(page, "在 web 端继续");
-
-  await page.getByRole("button").first().click().catch(() => {});
-
-  // About-you screen — Chinese headline + both sub-questions.
-  await expect(page.getByText("简单介绍一下你自己。")).toBeVisible({ timeout: 10000 });
-  await expect(page.getByText("你是什么角色？")).toBeVisible();
-  await page.waitForTimeout(500);
-  await page.screenshot({ path: `${SHOTS_DIR}/05-about-you-zh.png` });
+  await expect(page).toHaveURL(/\/workspaces\/new/);
+  await expect(
+    page.getByRole("heading", { name: "欢迎使用 Multica" }),
+  ).toBeVisible({ timeout: 15000 });
+  await expect(
+    page.getByRole("textbox", { name: "工作区名称" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("textbox", { name: "工作区 URL" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "创建工作区" }),
+  ).toBeVisible();
+  await expect(page.getByText("简单介绍一下你自己。")).toHaveCount(0);
 });

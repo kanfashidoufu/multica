@@ -26,7 +26,7 @@ func (h *Handler) ImportExternalIssue(w http.ResponseWriter, r *http.Request) {
 		if len(attachments) > 0 {
 			resp.Attachments = make([]AttachmentResponse, len(attachments))
 			for idx, att := range attachments {
-				resp.Attachments[idx] = h.attachmentToResponse(ctx, att)
+				resp.Attachments[idx] = h.attachmentToResponse(ctx, att, attachmentURLModeSigned)
 			}
 		}
 		return resp

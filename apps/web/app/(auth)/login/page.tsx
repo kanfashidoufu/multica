@@ -187,7 +187,7 @@ function LoginPageContent() {
         <div className="flex min-h-screen items-center justify-center">
           <Card className="w-full max-w-sm">
             <CardHeader className="text-center">
-              <CardTitle className="text-2xl">
+              <CardTitle className="text-display-sm">
                 {t(($) => $.web.desktop_handoff.failed_title)}
               </CardTitle>
               <CardDescription>{desktopError}</CardDescription>
@@ -200,7 +200,7 @@ function LoginPageContent() {
       <div className="flex min-h-screen items-center justify-center">
         <Card className="w-full max-w-sm">
           <CardHeader className="text-center">
-            <CardTitle className="text-2xl">
+            <CardTitle className="text-display-sm">
               {t(($) => $.web.desktop_handoff.opening_title)}
             </CardTitle>
             <CardDescription>
@@ -258,7 +258,7 @@ function LoginPageContent() {
       onTokenObtained={setLoggedInCookie}
       showEmailLogin={!larkAuthEnabled}
       extra={
-        <span className="text-xs text-muted-foreground">
+        <span className="text-caption text-muted-foreground">
           {t(($) => $.web.prefer_desktop)}{" "}
           <Link
             href="/download"

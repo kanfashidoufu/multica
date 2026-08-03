@@ -90,7 +90,7 @@ func (h *Handler) LarkLogin(w http.ResponseWriter, r *http.Request) {
 	slog.Info("user logged in via lark", append(logger.RequestAttrs(r), "user_id", uuidToString(user.ID), "open_id", profile.OpenID)...)
 	writeJSON(w, http.StatusOK, LoginResponse{
 		Token: tokenString,
-		User:  userToResponse(user),
+		User:  h.userToResponse(user),
 	})
 }
 

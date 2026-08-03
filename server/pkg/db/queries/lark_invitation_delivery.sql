@@ -6,11 +6,11 @@ INSERT INTO lark_invitation_delivery (
     invitee_email,
     dedupe_key
 ) VALUES (
-    $1,
-    $2,
-    $3,
-    lower(trim($4)),
-    $5
+    sqlc.arg('invitation_id')::uuid,
+    sqlc.arg('workspace_id')::uuid,
+    sqlc.arg('tenant_key')::text,
+    lower(trim(sqlc.arg('invitee_email')::text)),
+    sqlc.arg('dedupe_key')::text
 )
 ON CONFLICT (dedupe_key) DO NOTHING;
 

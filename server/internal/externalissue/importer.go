@@ -1028,18 +1028,19 @@ func (i *Importer) notifyAssignee(ctx context.Context, issue db.Issue, assigneeI
 	if !assigneeID.Valid {
 		return
 	}
-	if err := i.Queries.AddIssueSubscriber(ctx, db.AddIssueSubscriberParams{
+	rowsAffected, err := i.Queries.AddIssueSubscriber(ctx, db.AddIssueSubscriberParams{
 		IssueID:  issue.ID,
 		UserType: "member",
 		UserID:   assigneeID,
 		Reason:   "assignee",
-	}); err != nil {
+	})
+	if err != nil {
 		i.warn("external issue import: subscribe assignee failed",
 			"issue_id", util.UUIDToString(issue.ID),
 			"assignee_id", util.UUIDToString(assigneeID),
 			"error", err,
 		)
-	} else {
+	} else if rowsAffected > 0 {
 		i.publishSubscriberAdded(issue, assigneeID)
 	}
 
