@@ -1,11 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
-import { NewWorkspacePage } from "@multica/views/workspace/new-workspace-page";
 import { InvitePage } from "@multica/views/invite";
 import { InvitationsPage } from "@multica/views/invitations";
+import { OnboardingFlow } from "@multica/views/onboarding";
 import { useNavigation } from "@multica/views/navigation";
 import { paths } from "@multica/core/paths";
 import { workspaceListOptions } from "@multica/core/workspace/queries";
 import { useWindowOverlayStore } from "@/stores/window-overlay-store";
+import { useLocalRuntimesPending } from "../platform/use-local-runtimes-pending";
 
 /**
  * Window-level transition overlay: renders above the tab system when the
@@ -13,7 +14,7 @@ import { useWindowOverlayStore } from "@/stores/window-overlay-store";
  *
  * This component is intentionally thin — just a fixed positioning shell
  * that covers the tab system. It does NOT hide traffic lights or provide
- * a drag strip: each contained view (NewWorkspacePage, InvitePage) renders
+ * a drag strip: each contained view (OnboardingFlow, InvitePage) renders
  * its own `<DragStrip />` as a flex-child at top so
  * native macOS traffic lights stay visible and the page content can fill
  * the window edge-to-edge. This matches the Linear/Notion/Arc pattern for
@@ -35,6 +36,7 @@ function WindowOverlayInner() {
   const close = useWindowOverlayStore((s) => s.close);
   const { push } = useNavigation();
   const { data: wsList = [] } = useQuery(workspaceListOptions());
+  const runtimesPending = useLocalRuntimesPending();
   if (!overlay) return null;
 
   // Back is only meaningful when there's somewhere to go — i.e. the user
@@ -42,12 +44,35 @@ function WindowOverlayInner() {
   // complete the flow.
   const onBack = wsList.length > 0 ? close : undefined;
 
+  // The daemon's PATH probe runs once at boot, so a newly-installed CLI
+  // (Claude / Codex / Cursor) does not show up until the daemon is bounced.
+  // Both onboarding entries need this — creating a second workspace hits the
+  // same runtime step.
+  const restartDaemon = async () => {
+    await window.daemonAPI?.restart?.();
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex flex-col overflow-auto bg-background">
+      {/* Creating a workspace is the onboarding flow entered at the
+          workspace step: a second workspace still needs its own runtime and
+          its own Mika, so running one flow keeps the two from drifting. */}
       {overlay.type === "new-workspace" && (
-        <NewWorkspacePage
-          onSuccess={(ws) => push(paths.workspace(ws.slug).issues())}
-          onBack={onBack}
+        <OnboardingFlow
+          mode="new_workspace"
+          onCancel={onBack}
+          onRuntimeRefresh={restartDaemon}
+          runtimesPending={runtimesPending}
+          onComplete={(ws, destination) => {
+            close();
+            if (ws && destination?.kind === "chat") {
+              push(paths.workspace(ws.slug).chatSession(destination.sessionId));
+            } else if (ws && destination?.kind === "issue") {
+              push(paths.workspace(ws.slug).issueDetail(destination.issueId));
+            } else if (ws) {
+              push(paths.workspace(ws.slug).issues());
+            }
+          }}
         />
       )}
       {overlay.type === "invite" && (

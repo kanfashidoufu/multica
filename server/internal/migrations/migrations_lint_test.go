@@ -160,6 +160,35 @@ func TestLocalMigrationScaffoldsAreCompleted(t *testing.T) {
 	}
 }
 
+func TestIssueOriginMigrationsPreserveExternalIssue(t *testing.T) {
+	files := migrationFilesForLint(t, "*.sql")
+
+	for _, file := range files {
+		base := filepath.Base(file)
+		match := migrationPrefixPattern.FindStringSubmatch(base)
+		if match == nil {
+			continue
+		}
+		prefix, err := strconv.Atoi(match[1])
+		if err != nil {
+			t.Fatalf("parse migration prefix for %s: %v", base, err)
+		}
+		if prefix <= 117 {
+			continue
+		}
+
+		contents, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", base, err)
+		}
+		sql := string(contents)
+		if strings.Contains(sql, "ADD CONSTRAINT issue_origin_type_check") &&
+			!strings.Contains(sql, "'external_issue'") {
+			t.Errorf("migration %s rebuilds issue_origin_type_check without preserving external_issue", base)
+		}
+	}
+}
+
 func migrationStemsByPrefix(t *testing.T) map[string][]string {
 	t.Helper()
 
