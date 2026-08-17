@@ -2,7 +2,10 @@ import { useEffect, useRef, useSyncExternalStore } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { motion } from "motion/react";
 import { cn } from "@multica/ui/lib/utils";
-import { useTabHistory } from "@/hooks/use-tab-history";
+import {
+  useNavigationInputBindings,
+  useTabHistory,
+} from "@/hooks/use-tab-history";
 import {
   SidebarProvider,
   SidebarTrigger,
@@ -13,7 +16,10 @@ import { AppSidebar, GlobalShortcuts } from "@multica/views/layout";
 import { SearchCommand, SearchTrigger } from "@multica/views/search";
 import { FloatingChat } from "@multica/views/chat";
 import { WorkspaceSlugProvider, paths, useCurrentWorkspace } from "@multica/core/paths";
-import { useNavigation } from "@multica/views/navigation";
+import {
+  useNavigation,
+  type LinkClickIntent,
+} from "@multica/views/navigation";
 import { getCurrentSlug, subscribeToCurrentSlug } from "@multica/core/platform";
 import { useDesktopUnreadBadge } from "@multica/views/platform";
 import {
@@ -101,6 +107,7 @@ function useNativeNavigationGestures() {
   }, [goBack, goForward]);
 }
 
+
 // The main area's top bar doubles as a window drag region. When the sidebar
 // is not occupying main-flow width, leave room for the fixed window toolbar
 // so tabs do not land beneath the traffic lights / navigation controls.
@@ -152,9 +159,11 @@ function MainCanvas({ children }: { children: React.ReactNode }) {
 function useInternalLinkHandler() {
   useEffect(() => {
     const handler = (e: Event) => {
-      const path = (e as CustomEvent).detail?.path;
-      if (!path) return;
-      routeContentLinkPath(path);
+      const detail = (
+        e as CustomEvent<{ path?: string; disposition?: LinkClickIntent }>
+      ).detail;
+      if (!detail?.path) return;
+      routeContentLinkPath(detail.path, detail.disposition);
     };
     window.addEventListener("multica:navigate", handler);
     return () => window.removeEventListener("multica:navigate", handler);
@@ -208,6 +217,7 @@ function DesktopInboxBridge() {
 export function DesktopShell() {
   useInternalLinkHandler();
   useNativeNavigationGestures();
+  useNavigationInputBindings();
 
   // Reactive read of current workspace slug from the platform singleton.
   // On first mount, slug is null until WorkspaceRouteLayout (inside the tab
@@ -228,7 +238,12 @@ export function DesktopShell() {
       <WorkspaceSlugProvider slug={slug}>
         <DesktopInboxBridge />
         <div className="flex h-screen bg-app-shell">
-          <SidebarProvider className="flex-1 bg-app-shell">
+          {/* bg-app-shell is the wrapper's non-inset fill, so it also owns the
+              non-inset half of --sidebar-wrapper-fill. sidebar.tsx supplies the
+              inset half of both. Anything that has to paint an opaque layer
+              over this wrapper (the tab flares) reads the variable rather than
+              re-deriving which of the two is in play. */}
+          <SidebarProvider className="flex-1 bg-app-shell [--sidebar-wrapper-fill:var(--app-shell)]">
             {slug && <GlobalShortcuts />}
             {slug && <WindowToolbar />}
             {slug && <AppSidebar topSlot={<SidebarTopSpacer />} searchSlot={<SearchTrigger />} />}

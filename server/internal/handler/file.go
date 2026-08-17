@@ -66,6 +66,16 @@ type AttachmentResponse struct {
 	Filename      string  `json:"filename"`
 	URL           string  `json:"url"`
 	DownloadURL   string  `json:"download_url"`
+	// AttachmentDownloadURL is a credential-free URL that forces a
+	// Content-Disposition: attachment across every storage mode, for the
+	// download BUTTON — unlike DownloadURL, which is load-intent and keeps
+	// serving media inline so the preview path (resolvePreviewMediaUrl) can
+	// render it. Like DownloadURL it can be short-lived (a 60s proxy capability,
+	// a presigned URL) and therefore MUST NOT be persisted, and it is emitted
+	// ONLY by the single-attachment endpoint (GetAttachmentByID), never in list
+	// responses. Empty when the server cannot mint one for the object's storage
+	// mode; clients fall back to DownloadURL. (MUL follow-up to #6092 / #6713.)
+	AttachmentDownloadURL string `json:"attachment_download_url,omitempty"`
 	// MarkdownURL is the durable, absolute-when-possible URL the client
 	// SHOULD persist into markdown bodies (issue descriptions, comments,
 	// chat messages). It is computed per deployment policy by
@@ -665,7 +675,7 @@ func (h *Handler) GetAttachmentByID(w http.ResponseWriter, r *http.Request) {
 	// bulk callers. This endpoint prefers DownloadPresigner's inline-aware
 	// variant below, so start from the stable path when that more capable
 	// interface is available and avoid signing the same object twice.
-	if h.CFSigner == nil && downloadMode == attachmentDownloadModePresign {
+	if downloadMode == attachmentDownloadModePresign {
 		if _, ok := h.Storage.(storage.DownloadPresigner); ok {
 			responseMode = attachmentURLModeStable
 		}
@@ -679,8 +689,26 @@ func (h *Handler) GetAttachmentByID(w http.ResponseWriter, r *http.Request) {
 	// stored Content-Disposition (inline for media, attachment otherwise), which
 	// keeps images renderable inline while preserving the original download
 	// filename.
-	switch {
-	case h.CFSigner == nil && downloadMode == attachmentDownloadModePresign:
+	switch downloadMode {
+	case attachmentDownloadModeCloudFront:
+		// CloudFront mode: attachmentToResponse already set DownloadURL to an
+		// inline-intent signed URL. The download button needs the forced-
+		// attachment sibling. response-content-disposition is folded into the
+		// signed Resource (SignedURLWithContentDisposition), so a client cannot
+		// strip or alter it without invalidating the signature. Keying on the
+		// resolved mode (not h.CFSigner != nil) lets an explicit proxy/presign
+		// override take effect even when a signer is configured; the nil guard
+		// keeps an explicit cloudfront mode without a configured signer from
+		// panicking — the field is left empty and the client falls back to
+		// download_url, the same graceful degrade attachmentToResponse uses.
+		if h.CFSigner != nil {
+			resp.AttachmentDownloadURL = h.CFSigner.SignedURLWithContentDisposition(
+				att.Url,
+				storage.AttachmentContentDisposition(att.Filename),
+				time.Now().Add(h.attachmentDownloadURLTTL()),
+			)
+		}
+	case attachmentDownloadModePresign:
 		if presigner, ok := h.Storage.(storage.DownloadPresigner); ok {
 			key := h.Storage.KeyFromURL(att.Url)
 			signedURL, err := presigner.PresignGetWithContentDisposition(r.Context(), key, h.attachmentDownloadURLTTL(), "")
@@ -689,8 +717,17 @@ func (h *Handler) GetAttachmentByID(w http.ResponseWriter, r *http.Request) {
 			} else {
 				resp.DownloadURL = signedURL
 			}
+			// Download-intent sibling: the same presigned object, but with a
+			// forced attachment disposition so the download button saves the
+			// file instead of previewing it. Independent of DownloadURL's inline
+			// signature above; either may be present without the other.
+			if dlURL, err := presigner.PresignGetWithContentDisposition(r.Context(), key, h.attachmentDownloadURLTTL(), storage.AttachmentContentDisposition(att.Filename)); err != nil {
+				slog.Warn("failed to presign attachment download URL", "id", uuidToString(att.ID), "key", key, "error", err)
+			} else {
+				resp.AttachmentDownloadURL = dlURL
+			}
 		}
-	case h.CFSigner == nil && downloadMode == attachmentDownloadModeProxy:
+	case attachmentDownloadModeProxy:
 		// Proxy mode has no signed storage URL to offer, so this response
 		// would otherwise hand back the auth-gated API path — which a
 		// native download on a token-mode client cannot authenticate,
@@ -702,12 +739,10 @@ func (h *Handler) GetAttachmentByID(w http.ResponseWriter, r *http.Request) {
 		// Only here, never in attachmentToResponse: list responses are held
 		// far longer than the TTL, so a capability embedded in one would be
 		// expired by the time anything used it.
-		//
-		// Gated on CFSigner being nil for the same reason as the presign
-		// branch above: when a signer is configured attachmentToResponse has
-		// already produced a credential-free signed URL, which solves the
-		// native-download problem without a capability.
 		resp.DownloadURL = attachmentCapabilityPath(resp.ID, time.Now())
+		// Download-intent sibling capability (dl=1): the redemption route turns
+		// it into a Content-Disposition: attachment, for the download button.
+		resp.AttachmentDownloadURL = attachmentDownloadCapabilityPath(resp.ID, time.Now())
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -860,7 +895,7 @@ func (h *Handler) DownloadAttachment(w http.ResponseWriter, r *http.Request) {
 		h.setAttachmentPreviewSecurityHeaders(w)
 		http.Redirect(w, r, signedURL, http.StatusFound)
 	case attachmentDownloadModeProxy:
-		h.proxyAttachmentDownload(w, r, att, key)
+		h.proxyAttachmentDownload(w, r, att, key, false)
 	default:
 		writeError(w, http.StatusInternalServerError, "invalid attachment download mode")
 	}
@@ -952,7 +987,7 @@ func (h *Handler) ServeLocalUpload(w http.ResponseWriter, r *http.Request) {
 //     (serveProxyRange). Multi-range is not implemented on this path; per
 //     RFC 7233 it is ignored and the full body is served (200), matching the
 //     seekable path's successful outcome rather than failing with 416.
-func (h *Handler) proxyAttachmentDownload(w http.ResponseWriter, r *http.Request, att db.Attachment, key string) {
+func (h *Handler) proxyAttachmentDownload(w http.ResponseWriter, r *http.Request, att db.Attachment, key string, forceAttachment bool) {
 	reader, err := h.Storage.GetReader(r.Context(), key)
 	if err != nil {
 		slog.Error("failed to open attachment for download", "id", uuidToString(att.ID), "key", key, "error", err)
@@ -966,7 +1001,13 @@ func (h *Handler) proxyAttachmentDownload(w http.ResponseWriter, r *http.Request
 	} else {
 		w.Header().Set("Content-Type", "application/octet-stream")
 	}
-	w.Header().Set("Content-Disposition", storage.ContentDisposition(att.ContentType, att.Filename))
+	disposition := storage.ContentDisposition(att.ContentType, att.Filename)
+	if forceAttachment {
+		// Download-intent capability (dl=1): override the media-aware inline
+		// disposition so the browser saves the file instead of previewing it.
+		disposition = storage.AttachmentContentDisposition(att.Filename)
+	}
+	w.Header().Set("Content-Disposition", disposition)
 	// no-store predates Range support; keep it. Range/206 semantics are
 	// independent of caching — clients resume via Content-Range, not the cache.
 	w.Header().Set("Cache-Control", "no-store")

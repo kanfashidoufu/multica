@@ -2,6 +2,7 @@
 
 import { readFileSync } from "node:fs";
 import { cleanup, fireEvent, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { api } from "@multica/core/api";
@@ -585,5 +586,86 @@ describe("AgentTranscriptDialog", () => {
     ]);
 
     expect(screen.queryByRole("button", { name: "Show all" })).not.toBeInTheDocument();
+  });
+
+  // The run-details provider row used to carry its own name map. Pointing it at
+  // the shared runtime formatter is right for every provider except Claude,
+  // whose runtime-list name is "Claude" while this diagnostic row has always
+  // said "Claude Code" — and whose legacy `claude-code` slug title-cases into
+  // "Claude-code". Both aliases are pinned here so the next cleanup keeps them.
+  it.each([
+    ["claude", "Claude Code"],
+    ["claude-code", "Claude Code"],
+    // Everything outside the alias table defers to the shared runtime
+    // formatter, so a new provider needs no edit here.
+    ["omp", "Oh-My-Pi"],
+  ])("names a %s run %s in the run details", async (provider, expected) => {
+    const user = userEvent.setup();
+    vi.mocked(api.listRuntimes).mockResolvedValue([runtimeFor(provider)]);
+
+    renderDialog(items, { task: { ...baseTask, runtime_id: "runtime-1" } });
+
+    await user.click(await screen.findByRole("button", { name: "Run details" }));
+    expect(await screen.findByText(expected)).toBeInTheDocument();
+  });
+});
+
+// A worktree-mode run never touches the user's working copy: the branch is the
+// only pointer to what it produced. Showing it in Run details is what makes the
+// result findable — including for a run that failed partway, which still
+// commits whatever the agent had done.
+describe("AgentTranscriptDialog — delivered branch", () => {
+  it("shows the branch and copies it", async () => {
+    renderDialog(items, {
+      task: { ...baseTask, branch_name: "agent/j/abc12345" },
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Run details" }));
+
+    expect(screen.getByText("agent/j/abc12345")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByTitle("Copy branch name"));
+    expect(copyTextMock).toHaveBeenCalledWith("agent/j/abc12345");
+  });
+
+  it("renders nothing for tasks that delivered no branch", async () => {
+    renderDialog(items, { task: { ...baseTask, branch_name: undefined } });
+
+    await userEvent.click(screen.getByRole("button", { name: "Run details" }));
+
+    expect(screen.queryByTitle("Copy branch name")).not.toBeInTheDocument();
+  });
+});
+
+// A server-cancelled run (worktree claim gate, preserved-work delivery) must
+// explain itself: the reason rides the status badge and the full persisted
+// error is readable in Run details. A user's own cancel stays a plain
+// "Cancelled" — they know why they clicked.
+describe("AgentTranscriptDialog — cancel reason", () => {
+  const gateError = "worktree mode needs daemon version 0.4.24 or newer on that machine";
+
+  it("labels a server-cancelled run and surfaces the persisted reason", async () => {
+    renderDialog(items, {
+      task: {
+        ...baseTask,
+        status: "cancelled",
+        error: gateError,
+        failure_reason: "local_directory_error",
+      },
+    });
+
+    expect(screen.getByText(/Local directory error/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Run details" }));
+    expect(screen.getByText(gateError)).toBeInTheDocument();
+  });
+
+  it("keeps a user-initiated cancel a plain Cancelled", () => {
+    renderDialog(items, {
+      task: { ...baseTask, status: "cancelled", error: null },
+    });
+
+    expect(screen.getByText("Cancelled")).toBeInTheDocument();
+    expect(screen.queryByText(/Local directory error/)).not.toBeInTheDocument();
   });
 });

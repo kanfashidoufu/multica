@@ -4,9 +4,11 @@ import { useState } from "react";
 import {
   Check,
   ChevronRight,
+  ExternalLink,
   Loader2,
   MoreHorizontal,
   Plus,
+  RotateCw,
   Search,
   Trash2,
   X,
@@ -16,6 +18,7 @@ import { toast } from "sonner";
 import type { Agent, SkillSummary } from "@multica/core/types";
 import { api } from "@multica/core/api";
 import { workspaceKeys } from "@multica/core/workspace/queries";
+import { useWorkspacePaths } from "@multica/core/paths";
 import { resolvePublicFileUrl } from "@multica/core/workspace/avatar-url";
 import { Button } from "@multica/ui/components/ui/button";
 import { Checkbox } from "@multica/ui/components/ui/checkbox";
@@ -48,6 +51,9 @@ import {
 import { ActorAvatar } from "@multica/ui/components/common/actor-avatar";
 import { cn } from "@multica/ui/lib/utils";
 import { useT } from "../../i18n";
+import { useIntentNavigate } from "../../navigation";
+import { isRefreshableOrigin, readOrigin } from "../lib/origin";
+import { RefreshSkillDialog } from "./refresh-skill-dialog";
 import type { SkillRow } from "./skills-page";
 
 // Shared context the row kebab and the batch toolbar both need. Assembled
@@ -520,8 +526,15 @@ export function SkillRowActions({
   ctx: SkillActionsContext;
 }) {
   const { t } = useT("skills");
+  const { t: tCommon } = useT("common");
+  const paths = useWorkspacePaths();
+  const intentNavigate = useIntentNavigate();
   const [addOpen, setAddOpen] = useState(false);
+  const [refreshOpen, setRefreshOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+
+  const origin = readOrigin(row.skill);
+  const canRefresh = row.canEdit && isRefreshableOrigin(origin);
 
   return (
     <span
@@ -541,10 +554,29 @@ export function SkillRowActions({
           }
         />
         <DropdownMenuContent align="end" className="w-52">
+          <DropdownMenuItem
+            onClick={() =>
+              intentNavigate(
+                paths.skillDetail(row.skill.id),
+                "foreground-tab",
+                row.skill.name,
+              )
+            }
+          >
+            <ExternalLink className="size-3.5" />
+            {tCommon(($) => $.navigation.open_in_new_tab)}
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
           <DropdownMenuItem onClick={() => setAddOpen(true)}>
             <Plus className="size-3.5" />
             {t(($) => $.actions.add_to_agent)}
           </DropdownMenuItem>
+          {canRefresh && (
+            <DropdownMenuItem onClick={() => setRefreshOpen(true)}>
+              <RotateCw className="size-3.5" />
+              {t(($) => $.actions.refresh)}
+            </DropdownMenuItem>
+          )}
           {row.canEdit && (
             <>
               <DropdownMenuSeparator />
@@ -565,6 +597,15 @@ export function SkillRowActions({
         open={addOpen}
         onOpenChange={setAddOpen}
       />
+      {canRefresh && (
+        <RefreshSkillDialog
+          skill={row.skill}
+          origin={origin}
+          wsId={ctx.wsId}
+          open={refreshOpen}
+          onOpenChange={setRefreshOpen}
+        />
+      )}
       <DeleteSkillsDialog
         rows={[row]}
         ctx={ctx}

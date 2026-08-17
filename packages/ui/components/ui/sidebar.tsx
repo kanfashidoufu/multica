@@ -26,8 +26,6 @@ import {
 } from "@multica/ui/components/ui/tooltip"
 import { PanelLeftIcon } from "lucide-react"
 
-const SIDEBAR_COOKIE_NAME = "sidebar_state"
-const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
 const SIDEBAR_WIDTH_DEFAULT = 256
 const SIDEBAR_WIDTH_MIN = 200
 const SIDEBAR_WIDTH_MAX = 360
@@ -39,6 +37,22 @@ const SIDEBAR_DRAG_THRESHOLD = 2
 // narrow to also spend 256px on the nav. The nav starts collapsed here and the
 // header's trigger brings it back.
 const SIDEBAR_AUTO_COLLAPSE_QUERY = "(min-width: 1024px) and (max-width: 1279px)"
+
+/**
+ * Paints an element with whatever the sidebar wrapper is currently filled with.
+ *
+ * A descendant that has to lay down an opaque layer over the wrapper — rather
+ * than over its own parent — must match the wrapper's fill exactly, and that
+ * fill is conditional: `bg-sidebar` while an inset-variant sidebar is mounted,
+ * the consumer's own background otherwise. Naming a token at the descendant
+ * reproduces that condition in a second place, which then drifts (#6874). Use
+ * this class instead: the wrapper publishes its fill as `--sidebar-wrapper-fill`
+ * under the same `:has()` condition that paints it, so the two cannot disagree.
+ *
+ * Consumers that give the wrapper a background must declare the matching
+ * non-inset half, e.g. `bg-app-shell [--sidebar-wrapper-fill:var(--app-shell)]`.
+ */
+const SIDEBAR_WRAPPER_FILL_CLASS = "bg-(--sidebar-wrapper-fill)"
 
 function clampSidebarWidth(width: number) {
   return Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, width))
@@ -124,6 +138,15 @@ function SidebarProvider({
 
   // This is the internal state of the sidebar.
   // We use openProp and setOpenProp for control from outside the component.
+  //
+  // Deliberately not persisted. Upstream shadcn writes a `sidebar_state` cookie
+  // here and seeds `defaultOpen` from it on the server; we dropped the write
+  // because nothing ever read it, and restoring the pair would be a bug rather
+  // than a feature: the auto-collapse below drives `setOpen(false)` from the
+  // viewport, so persisting its result would carry a collapse the user never
+  // asked for out of the `lg`–`xl` band and into their next session on a wider
+  // display. Persisting this needs a source that distinguishes a user toggle
+  // from an automated one — not a cookie on this callback.
   const [_open, _setOpen] = React.useState(defaultOpen)
   const open = openProp ?? _open
   const setOpen = React.useCallback(
@@ -134,9 +157,6 @@ function SidebarProvider({
       } else {
         _setOpen(openState)
       }
-
-      // This sets the cookie to keep the sidebar state.
-      document.cookie = `${SIDEBAR_COOKIE_NAME}=${openState}; path=/; max-age=${SIDEBAR_COOKIE_MAX_AGE}`
     },
     [setOpenProp, open]
   )
@@ -214,7 +234,14 @@ function SidebarProvider({
             } as React.CSSProperties
           }
           className={cn(
-            "group/sidebar-wrapper flex min-h-svh w-full has-data-[variant=inset]:bg-sidebar",
+            "group/sidebar-wrapper flex min-h-svh w-full",
+            // Both halves of the inset branch carry the identical :has()
+            // condition, so SIDEBAR_WRAPPER_FILL_CLASS can never name a colour
+            // this element is not actually painted with. The non-inset fill is
+            // the consumer's (this component paints nothing then), so the
+            // consumer declares that half of the variable next to its own
+            // background class.
+            "has-data-[variant=inset]:bg-sidebar has-data-[variant=inset]:[--sidebar-wrapper-fill:var(--sidebar)]",
             className
           )}
           {...props}
@@ -904,6 +931,7 @@ function SidebarMenuSubButton({
 }
 
 export {
+  SIDEBAR_WRAPPER_FILL_CLASS,
   Sidebar,
   SidebarContent,
   SidebarFooter,

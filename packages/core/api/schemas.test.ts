@@ -47,7 +47,11 @@ import {
   SquadSchema,
   TimelineEntriesSchema,
   UserSchema,
+  EMPTY_PLUGIN_CATALOG,
+  PluginCatalogResponseSchema,
+  PluginInstallationSchema,
 } from "./schemas";
+import { IssueViewSchema, IssueViewListSchema } from "./schemas";
 import { parseWithFallback } from "./schema";
 
 const baseIssue = {
@@ -1244,6 +1248,63 @@ describe("RuntimeModelListRequestSchema", () => {
   });
 });
 
+describe("IssueViewSchema", () => {
+  const valid = {
+    id: "v1",
+    workspace_id: "ws1",
+    owner_id: "u1",
+    name: "Needs review",
+    scope_type: "workspace",
+    scope_id: null,
+    scope_variant: null,
+    visibility: "workspace",
+    definition_version: 1,
+    query: { statusFilters: ["in_review"] },
+    display: { viewMode: "board" },
+    revision: 3,
+    created_at: "2026-08-06T00:00:00Z",
+    updated_at: "2026-08-06T00:00:00Z",
+  };
+
+  it("parses a well-formed view and keeps unknown future fields", () => {
+    const parsed = IssueViewSchema.parse({ ...valid, future_field: "keep me" });
+    expect(parsed.name).toBe("Needs review");
+    expect(parsed.query).toEqual({ statusFilters: ["in_review"] });
+    expect((parsed as unknown as { future_field?: string }).future_field).toBe("keep me");
+  });
+
+  it("defaults missing definition blobs instead of failing", () => {
+    const parsed = IssueViewSchema.parse({ id: "v2" });
+    expect(parsed.query).toEqual({});
+    expect(parsed.display).toEqual({});
+    expect(parsed.revision).toBe(1);
+  });
+
+  it("degrades a malformed list response to [] via parseWithFallback", () => {
+    expect(
+      parseWithFallback({ nonsense: true }, IssueViewListSchema, [], {
+        endpoint: "GET /api/issue-views",
+      }),
+    ).toEqual([]);
+    expect(
+      parseWithFallback(null, IssueViewListSchema, [], {
+        endpoint: "GET /api/issue-views",
+      }),
+    ).toEqual([]);
+  });
+
+  it("degrades a malformed detail response to null — NOT an error", () => {
+    // The sidebar's pinned view rows hinge on this distinction: a parse
+    // fallback (null, no error) hides the row, while only a REAL 404
+    // error may ever unpin. A malformed body must never destroy a pin.
+    expect(
+      parseWithFallback({ nonsense: true }, IssueViewSchema.nullable(), null, {
+        endpoint: "GET /api/issue-views/{id}",
+      }),
+    ).toBeNull();
+  });
+});
+
 // WeCom smart-bot installation schemas. These gate UI affordances (the Connect
 // dialog, the "ask your operator" state, the revoked-vs-active badge), so a
 // malformed response must degrade to the safe state rather than a broken one.
@@ -1303,5 +1364,35 @@ describe("WeCom installation schemas", () => {
       { endpoint: "POST /api/wecom/binding/redeem" },
     );
     expect(redeem).toEqual(EMPTY_REDEEM_WECOM_BINDING_TOKEN_RESPONSE);
+  });
+});
+
+describe("Plugin catalog schemas", () => {
+  it("defaults optional release fields without granting trust or compatibility", () => {
+    const parsed = PluginCatalogResponseSchema.parse({
+      releases: [{ plugin_key: "ai.multica.software-delivery", version: "1.0.0" }],
+    });
+    expect(parsed.supported).toBe(true);
+    expect(parsed.releases[0]?.compatible).toBe(false);
+    expect(parsed.releases[0]?.signature_verified).toBe(false);
+    expect(parsed.releases[0]?.contributions).toEqual([]);
+  });
+
+  it("defaults missing lifecycle and binding fields to a disabled error state", () => {
+    const parsed = PluginInstallationSchema.parse({ id: "installation-1" });
+    expect(parsed.enabled).toBe(false);
+    expect(parsed.lifecycle_status).toBe("error");
+    expect(parsed.bindings).toEqual([]);
+    expect(parsed.trust_tier).toBe("");
+    expect(parsed.signature_verified).toBe(false);
+    expect(parsed.contribution_details).toEqual([]);
+  });
+
+  it("degrades a malformed catalog response to unsupported and empty", () => {
+    const parsed = parseWithFallback("not-json", PluginCatalogResponseSchema, EMPTY_PLUGIN_CATALOG, {
+      endpoint: "GET /api/workspaces/{id}/plugins/catalog",
+    });
+    expect(parsed).toEqual(EMPTY_PLUGIN_CATALOG);
+    expect(parsed.supported).toBe(false);
   });
 });

@@ -26,6 +26,8 @@ import (
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/featureflag"
+	"github.com/multica-ai/multica/server/pkg/plugincontract"
+	"github.com/multica-ai/multica/server/pkg/pluginruntime"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 	"github.com/multica-ai/multica/server/pkg/redact"
 	"github.com/multica-ai/multica/server/pkg/skillbundle"
@@ -1559,8 +1561,8 @@ var ErrChatQuickActionsStale = errors.New("chat quick actions: refresh target is
 // quota-spending pass (MUL-5149).
 var ErrChatQuickActionsBusy = errors.New("chat quick actions: session busy")
 
-// ErrChatSessionArchived signals that a direct-chat send lost a race with
-// archiving the session and therefore must not persist a new turn.
+// ErrChatSessionArchived signals that a send or a debounced channel flush lost
+// a race with archiving the session and therefore must not persist a new turn.
 var ErrChatSessionArchived = errors.New("chat task: session archived")
 
 // EnqueueChatTask creates a task-owned input batch for a chat session. Channel
@@ -1570,9 +1572,9 @@ var ErrChatSessionArchived = errors.New("chat task: session archived")
 //
 // Errors split into two layers:
 //
-//   - Productizable rejections (agent archived, no runtime) return
-//     the sentinel errors above. Callers (e.g. the Lark dispatcher)
-//     can errors.Is them to decide a user-visible outcome.
+//   - Productizable rejections (agent archived, no runtime, session
+//     archived) return the sentinel errors above. Callers (e.g. the Lark
+//     dispatcher) can errors.Is them to decide a user-visible outcome.
 //
 //   - Infrastructure failures (DB load / insert errors) are wrapped
 //     as ordinary errors. The caller should treat them as retryable
@@ -1625,6 +1627,45 @@ func (s *TaskService) EnqueueChatTask(ctx context.Context, chatSession db.ChatSe
 	}
 	defer tx.Rollback(ctx)
 	qtx := s.Queries.WithTx(tx)
+	// Refuse to enqueue onto a session that has been archived, the same guard
+	// the direct-send path takes. This is the one enqueue path with a delay in
+	// front of it: the channel run trigger is debounced by
+	// DefaultChatRunBatchWindow, so the message is persisted immediately and
+	// the task row is only created here, up to a window later. An archive
+	// committing inside that window cancels the tasks it can see — there are
+	// none yet — and drops the channel binding, and without this check the
+	// flush then inserts a fresh task on a conversation the user closed.
+	// ClaimAgentTask does not read chat_session.status either, so the daemon
+	// would run it: quota and runtime spent on a closed conversation, new
+	// assistant turns written into an archived chat, the agent flipped back to
+	// 'working', and the brief describing the run as a private web chat
+	// because the binding is already gone.
+	//
+	// The lock is what makes the check hold — the caller's copy of the session
+	// was loaded before the transaction opened and can already be stale, the
+	// same reason the send path re-reads the agent under its lock. It is
+	// deliberately FOR NO KEY UPDATE rather than the send path's FOR UPDATE;
+	// see LockChatSessionForEnqueue for why the channel path cannot afford to
+	// block the inbound appends FOR UPDATE would. Taken as the transaction's
+	// first statement, so the chat_session -> agent_task_queue order is
+	// unchanged and no new deadlock edge appears.
+	currentSession, err := qtx.LockChatSessionForEnqueue(ctx, chatSession.ID)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("lock chat session: %w", err)
+	}
+	if currentSession.Status != "active" {
+		return db.AgentTaskQueue{}, ErrChatSessionArchived
+	}
+	// Lock the channel binding only after the chat_session lock above. The
+	// append path touches chat_session before binding as well, so this order
+	// avoids an ABBA edge while keeping pending fresh in the enqueue transaction.
+	pendingFresh, err := qtx.LockChannelChatSessionPendingFresh(ctx, chatSession.ID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return db.AgentTaskQueue{}, fmt.Errorf("lock channel pending fresh: %w", err)
+	}
+	if err == nil && pendingFresh {
+		forceFreshSession = true
+	}
 	mediaPendingUntil, err := qtx.GetChannelMediaPendingUntil(ctx, chatSession.ID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		slog.Error("chat task enqueue failed", "chat_session_id", util.UUIDToString(chatSession.ID), "error", err)
@@ -1675,6 +1716,11 @@ func (s *TaskService) EnqueueChatTask(ctx context.Context, chatSession db.ChatSe
 		task = corrected
 	case !errors.Is(err, pgx.ErrNoRows):
 		return db.AgentTaskQueue{}, fmt.Errorf("defer chat task for sealed pending media: %w", err)
+	}
+	if pendingFresh {
+		if err := qtx.ClearChannelChatSessionPendingFresh(ctx, chatSession.ID); err != nil {
+			return db.AgentTaskQueue{}, fmt.Errorf("clear channel pending fresh: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return db.AgentTaskQueue{}, fmt.Errorf("commit chat task enqueue: %w", err)
@@ -1848,42 +1894,7 @@ var ErrChatSessionAlreadyStarted = errors.New("chat session already has a user m
 // The caller must have already gated the session and preflighted the agent
 // (archived / no-runtime), passing the loaded agent in. Those checks are repeated
 // under the transaction locks below because either row may change before enqueue.
-func (s *TaskService) SendDirectChatMessage(ctx context.Context, session db.ChatSession, agent db.Agent, initiatorUserID pgtype.UUID, content string, attachmentIDs []pgtype.UUID, uploaderType string, uploaderID pgtype.UUID) (*DirectChatSendResult, error) {
-	return s.sendDirectChatMessage(
-		ctx,
-		session,
-		agent,
-		initiatorUserID,
-		content,
-		attachmentIDs,
-		uploaderType,
-		uploaderID,
-		protocol.ChatMessageKindMessage,
-		false,
-	)
-}
-
-// StartMikaOnboardingChat enqueues the product-authored opening turn for a
-// newly-created Mika session. The turn is stored with a dedicated message kind
-// so clients can keep it out of the visible transcript. requireEmptySession is
-// enforced under the chat-session lock, making retries and double-submits
-// idempotent even when they race.
-func (s *TaskService) StartMikaOnboardingChat(ctx context.Context, session db.ChatSession, agent db.Agent, initiatorUserID pgtype.UUID, content string, uploaderType string, uploaderID pgtype.UUID) (*DirectChatSendResult, error) {
-	return s.sendDirectChatMessage(
-		ctx,
-		session,
-		agent,
-		initiatorUserID,
-		content,
-		nil,
-		uploaderType,
-		uploaderID,
-		protocol.ChatMessageKindOnboardingKickoff,
-		true,
-	)
-}
-
-func (s *TaskService) sendDirectChatMessage(
+func (s *TaskService) SendDirectChatMessage(
 	ctx context.Context,
 	session db.ChatSession,
 	agent db.Agent,
@@ -1892,8 +1903,6 @@ func (s *TaskService) sendDirectChatMessage(
 	attachmentIDs []pgtype.UUID,
 	uploaderType string,
 	uploaderID pgtype.UUID,
-	messageKind string,
-	requireEmptySession bool,
 ) (*DirectChatSendResult, error) {
 	// Build the per-task Composio overlay before the transaction — it can do
 	// network I/O and must not run with a DB transaction open.
@@ -1941,15 +1950,6 @@ func (s *TaskService) sendDirectChatMessage(
 		if !carrier.RuntimeID.Valid {
 			return ErrChatTaskAgentNoRuntime
 		}
-		if requireEmptySession {
-			hasUserMessage, err := qtx.ChatSessionHasUserMessage(ctx, session.ID)
-			if err != nil {
-				return fmt.Errorf("check chat session input: %w", err)
-			}
-			if hasUserMessage {
-				return ErrChatSessionAlreadyStarted
-			}
-		}
 
 		// The database status of every newly-created task is "queued" until a
 		// daemon claims it. Product queue semantics are positional instead: this
@@ -1989,6 +1989,21 @@ func (s *TaskService) sendDirectChatMessage(
 		}
 		out.Task = task
 
+		// Adopt the onboarding kickoff, if this session still has an unowned one.
+		// It is written by OpenMikaOnboardingChat with no task, so this is the
+		// only thing that ever delivers it to a runtime — and it must happen
+		// before the member's own row is written, so the batch reads as
+		// "context, then their message" once ordered by created_at.
+		//
+		// A no-op for every other session: only Mika onboarding writes that kind,
+		// and only the first send of one finds it unowned.
+		if err := qtx.AdoptOrphanOnboardingKickoff(ctx, db.AdoptOrphanOnboardingKickoffParams{
+			ChatSessionID: session.ID,
+			TaskID:        task.ID,
+		}); err != nil {
+			return fmt.Errorf("adopt onboarding kickoff: %w", err)
+		}
+
 		// Create the user message already owned by this task (task_id = task.id),
 		// so it belongs to this immutable input batch the instant it exists.
 		msg, err := qtx.CreateChatMessage(ctx, db.CreateChatMessageParams{
@@ -1996,7 +2011,7 @@ func (s *TaskService) sendDirectChatMessage(
 			Role:          "user",
 			Content:       content,
 			TaskID:        task.ID,
-			MessageKind:   pgtype.Text{String: messageKind, Valid: true},
+			MessageKind:   pgtype.Text{String: protocol.ChatMessageKindMessage, Valid: true},
 		})
 		if err != nil {
 			return fmt.Errorf("create user chat message: %w", err)
@@ -2040,6 +2055,89 @@ func (s *TaskService) sendDirectChatMessage(
 	return &out, nil
 }
 
+// MikaOnboardingOpenResult carries the two rows that open a Mika conversation.
+type MikaOnboardingOpenResult struct {
+	// Kickoff is the hidden product context. It is written WITHOUT a task —
+	// the member's first real send adopts it (AdoptOrphanOnboardingKickoff).
+	Kickoff db.ChatMessage
+	// Opening is what the member reads, already final. No agent produced it,
+	// so it carries no task id, no elapsed time, and nothing to regenerate.
+	Opening db.ChatMessage
+}
+
+// OpenMikaOnboardingChat writes a Mika conversation's first two rows in one
+// transaction: the hidden kickoff and the product-authored opening the member
+// sees (MUL-5827). Nothing is enqueued — this used to be a full chat task, and
+// the member waited out a runtime cold start to read a reply the product had
+// already decided word for word.
+//
+// "Session is still empty" is enforced under the chat-session lock, so retries,
+// React double-submits, and two clients racing the same session still produce
+// at most one opening. The kickoff row is what makes that check work: it is a
+// role='user' row, so ChatSessionHasUserMessage sees it exactly as it saw the
+// old kickoff turn.
+func (s *TaskService) OpenMikaOnboardingChat(ctx context.Context, session db.ChatSession, kickoff, opening string) (*MikaOnboardingOpenResult, error) {
+	var out MikaOnboardingOpenResult
+	if err := s.runInTx(ctx, func(qtx *db.Queries) error {
+		// Same lock and lock ORDER as the send path, so an opening racing a
+		// first send or a runtime rebind serializes instead of deadlocking.
+		if _, err := qtx.LockChatSessionForRuntimeBind(ctx, session.ID); err != nil {
+			return fmt.Errorf("lock chat session: %w", err)
+		}
+		current, err := qtx.GetChatSession(ctx, session.ID)
+		if err != nil {
+			return fmt.Errorf("reload chat session: %w", err)
+		}
+		if current.Status != "active" {
+			return ErrChatSessionArchived
+		}
+		hasUserMessage, err := qtx.ChatSessionHasUserMessage(ctx, session.ID)
+		if err != nil {
+			return fmt.Errorf("check chat session input: %w", err)
+		}
+		if hasUserMessage {
+			return ErrChatSessionAlreadyStarted
+		}
+
+		kickoffRow, err := qtx.CreateChatMessage(ctx, db.CreateChatMessageParams{
+			ChatSessionID: session.ID,
+			Role:          "user",
+			Content:       kickoff,
+			MessageKind:   pgtype.Text{String: protocol.ChatMessageKindOnboardingKickoff, Valid: true},
+		})
+		if err != nil {
+			return fmt.Errorf("create onboarding kickoff: %w", err)
+		}
+		out.Kickoff = kickoffRow
+
+		// Ordered one microsecond after the kickoff — see the query comment for
+		// why a shared transaction timestamp is not good enough here.
+		openingRow, err := qtx.CreateMikaOnboardingOpening(ctx, db.CreateMikaOnboardingOpeningParams{
+			ChatSessionID:    session.ID,
+			KickoffCreatedAt: kickoffRow.CreatedAt,
+			Content:          opening,
+		})
+		if err != nil {
+			return fmt.Errorf("create onboarding opening: %w", err)
+		}
+		out.Opening = openingRow
+
+		if err := qtx.TouchChatSession(ctx, session.ID); err != nil {
+			return fmt.Errorf("touch chat session: %w", err)
+		}
+		return nil
+	}); err != nil {
+		if !errors.Is(err, ErrChatSessionAlreadyStarted) {
+			slog.Error("mika onboarding open failed",
+				"chat_session_id", util.UUIDToString(session.ID),
+				"agent_id", util.UUIDToString(session.AgentID),
+				"error", err)
+		}
+		return nil, err
+	}
+	return &out, nil
+}
+
 // CancelTasksForIssue cancels every active task on the issue, reconciles each
 // affected agent's status, and broadcasts task:cancelled events so frontends
 // clear their live cards.
@@ -2061,11 +2159,35 @@ func (s *TaskService) CancelTasksForIssue(ctx context.Context, issueID pgtype.UU
 	}
 	for _, t := range cancelled {
 		s.captureTaskCancelled(ctx, t)
-		s.ReconcileAgentStatus(ctx, t.AgentID)
 		s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, t)
+	}
+	// Reconcile once per distinct agent instead of once per cancelled row:
+	// cancelling an issue often stops several tasks owned by the same agent,
+	// and each reconcile is a DB write plus a status broadcast. Matches
+	// CancelTasksForAgent's single-reconcile shape (D#3319).
+	for _, agentID := range distinctAgentIDs(cancelled) {
+		s.ReconcileAgentStatus(ctx, agentID)
 	}
 	s.notifyTasksFinished(cancelled)
 	return nil
+}
+
+// distinctAgentIDs returns each agent id appearing in the cancelled rows once,
+// preserving first-seen order. Bulk cancellations frequently stop several tasks
+// owned by the same agent; reconciling per distinct agent (rather than per row)
+// collapses the redundant RefreshAgentStatusFromTasks writes and status
+// broadcasts down to one per agent without changing the final agent status.
+func distinctAgentIDs(cancelled []db.AgentTaskQueue) []pgtype.UUID {
+	seen := make(map[pgtype.UUID]struct{}, len(cancelled))
+	ids := make([]pgtype.UUID, 0, len(cancelled))
+	for _, t := range cancelled {
+		if _, dup := seen[t.AgentID]; dup {
+			continue
+		}
+		seen[t.AgentID] = struct{}{}
+		ids = append(ids, t.AgentID)
+	}
+	return ids
 }
 
 // CancelTasksForAgent cancels every active task belonging to an agent
@@ -2102,8 +2224,13 @@ func (s *TaskService) CancelTasksByTriggerComment(ctx context.Context, commentID
 	}
 	for _, t := range cancelled {
 		s.captureTaskCancelled(ctx, t)
-		s.ReconcileAgentStatus(ctx, t.AgentID)
 		s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, t)
+	}
+	// Reconcile once per distinct agent instead of once per cancelled row: an
+	// edited/deleted trigger comment can cancel several tasks owned by the same
+	// agent, and each reconcile is a DB write plus a status broadcast (D#3319).
+	for _, agentID := range distinctAgentIDs(cancelled) {
+		s.ReconcileAgentStatus(ctx, agentID)
 	}
 	s.notifyTasksFinished(cancelled)
 	return cancelled, nil
@@ -2113,11 +2240,23 @@ func (s *TaskService) CancelTasksByTriggerComment(ctx context.Context, commentID
 // task:cancelled for every row. Callers must invoke this AFTER committing the
 // cancellation so subscribers don't observe a "cancelled" event for a row
 // that the tx might still roll back.
-func (s *TaskService) BroadcastCancelledTasks(ctx context.Context, cancelled []db.AgentTaskQueue) {
+//
+// workspaceID comes from the caller instead of being resolved per task, because
+// the transaction these callers have just committed can delete the row the
+// resolution would read. A chat task's workspace is reached through its
+// chat_session, and both DeleteChatSession and the runtime teardown remove that
+// session — the teardown by deleting the system agent it hangs off. Afterwards
+// ResolveTaskWorkspaceID finds nothing and returns "", and publishTaskEvent
+// drops an event with no workspace before it reaches the bus: the rows are
+// cancelled, nobody is told, and every queue view and channel indicator keeps
+// showing a run that no longer exists. Each caller already knows the workspace
+// — it is the one whose session, member or runtime is being torn down — so the
+// lookup is not needed and cannot fail.
+func (s *TaskService) BroadcastCancelledTasks(ctx context.Context, workspaceID string, cancelled []db.AgentTaskQueue) {
 	for _, t := range cancelled {
 		s.captureTaskCancelled(ctx, t)
 		s.ReconcileAgentStatus(ctx, t.AgentID)
-		s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, t)
+		s.publishTaskEvent(protocol.EventTaskCancelled, workspaceID, t)
 	}
 	s.notifyTasksFinished(cancelled)
 }
@@ -2164,6 +2303,14 @@ type CancelTaskOptions struct {
 	QueuedOnly          bool
 	ExpectedChatSession pgtype.UUID
 	QueueAction         string
+	// ErrorMessage / FailureReason, when set, are persisted onto the cancelled
+	// row. Only for cancellations the USER did not ask for (e.g. the worktree
+	// claim gate refusing a too-old daemon): a user-initiated cancel needs no
+	// explanation, but a server-initiated one without a persisted reason
+	// surfaces as an unexplained "cancelled" whose only trace is a 4xx in a
+	// daemon log the user never sees.
+	ErrorMessage  string
+	FailureReason string
 }
 
 // CancelTask cancels a single task by ID. It broadcasts a task:cancelled event
@@ -2176,6 +2323,24 @@ func (s *TaskService) CancelTask(ctx context.Context, taskID pgtype.UUID) (*db.A
 	// synchronous restore anyway, and the durable path is the only one that can
 	// hand the prompt back at all.
 	result, err := s.CancelTaskWithResult(ctx, taskID, CancelTaskOptions{ClientSupportsDraftRestore: true})
+	if err != nil {
+		return nil, err
+	}
+	return &result.Task, nil
+}
+
+// CancelTaskWithReason cancels a task the SERVER decided to stop, persisting an
+// actionable reason onto the row. It runs the same full cancellation flow as
+// CancelTask — audit capture, chat settle, agent status reconcile,
+// task:cancelled broadcast, NotifyTaskFinished — because a raw
+// CancelAgentTaskWithReason query bypass leaves the agent pill running, the
+// live card stale, and any capacity/serial waiter unwoken.
+func (s *TaskService) CancelTaskWithReason(ctx context.Context, taskID pgtype.UUID, errorMessage, failureReason string) (*db.AgentTaskQueue, error) {
+	result, err := s.CancelTaskWithResult(ctx, taskID, CancelTaskOptions{
+		ClientSupportsDraftRestore: true,
+		ErrorMessage:               errorMessage,
+		FailureReason:              failureReason,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -2220,7 +2385,19 @@ func (s *TaskService) CancelTaskWithResult(ctx context.Context, taskID pgtype.UU
 			if err := lockChatSessionForTaskWrite(ctx, qtx, taskID); err != nil {
 				return err
 			}
-			cancelled, err := qtx.CancelAgentTask(ctx, taskID)
+			var (
+				cancelled db.AgentTaskQueue
+				err       error
+			)
+			if opts.ErrorMessage != "" || opts.FailureReason != "" {
+				cancelled, err = qtx.CancelAgentTaskWithReason(ctx, db.CancelAgentTaskWithReasonParams{
+					ID:            taskID,
+					Error:         pgtype.Text{String: opts.ErrorMessage, Valid: opts.ErrorMessage != ""},
+					FailureReason: pgtype.Text{String: opts.FailureReason, Valid: opts.FailureReason != ""},
+				})
+			} else {
+				cancelled, err = qtx.CancelAgentTask(ctx, taskID)
+			}
 			if err != nil {
 				return err
 			}
@@ -2405,7 +2582,7 @@ func (s *TaskService) settleQueuedChatInput(
 			return nil, fmt.Errorf("detach edited queued chat attachments: %w", err)
 		}
 	}
-	deleted, err := qtx.DeleteUserChatMessageByTask(ctx, inputOwnerID)
+	deleted, err := deleteUserChatInput(ctx, qtx, inputOwnerID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -2437,6 +2614,19 @@ func (s *TaskService) settleQueuedChatInput(
 	cancelled.RestoreToInput = true
 	cancelled.Attachments = detached
 	return cancelled, nil
+}
+
+// deleteUserChatInput removes a cancelled/edited turn's member-typed input and
+// releases any onboarding kickoff the turn had adopted — onto the session's
+// next queued turn when there is one, otherwise back to unowned (MUL-5827).
+// The two must happen together: deleting the input while leaving the kickoff
+// bound to the dead task would strand the onboarding context on a run that
+// will never happen.
+func deleteUserChatInput(ctx context.Context, qtx *db.Queries, inputOwnerID pgtype.UUID) (db.ChatMessage, error) {
+	if err := qtx.ReleaseOnboardingKickoffFromTask(ctx, inputOwnerID); err != nil {
+		return db.ChatMessage{}, fmt.Errorf("release onboarding kickoff: %w", err)
+	}
+	return qtx.DeleteUserChatMessageByTask(ctx, inputOwnerID)
 }
 
 func (s *TaskService) finalizeCancelledChatMessage(ctx context.Context, task db.AgentTaskQueue, opts CancelTaskOptions) *CancelledChatMessageResult {
@@ -2502,22 +2692,21 @@ func (s *TaskService) finalizeCancelledChatMessage(ctx context.Context, task db.
 			if err != nil {
 				return fmt.Errorf("detach cancelled chat message attachments: %w", err)
 			}
-			deleted, err := qtx.DeleteUserChatMessageByTask(ctx, inputOwnerID)
+			deleted, err := deleteUserChatInput(ctx, qtx, inputOwnerID)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil
 			}
 			if err != nil {
 				return fmt.Errorf("delete empty cancelled chat user message: %w", err)
 			}
+			// Always restorable now: the delete cannot return a kickoff row, so
+			// what comes back is always what the member typed (MUL-5827).
 			cancelled = &CancelledChatMessageResult{
 				ChatSessionID:  util.UUIDToString(deleted.ChatSessionID),
 				MessageID:      util.UUIDToString(deleted.ID),
 				Content:        deleted.Content,
-				RestoreToInput: deleted.MessageKind != protocol.ChatMessageKindOnboardingKickoff,
+				RestoreToInput: true,
 				Attachments:    detached,
-			}
-			if deleted.MessageKind == protocol.ChatMessageKindOnboardingKickoff {
-				cancelled.Content = ""
 			}
 			return nil
 		}
@@ -2549,6 +2738,27 @@ func (s *TaskService) finalizeCancelledChatMessage(ctx context.Context, task db.
 // atomic, so concurrent callers cannot finalize the same task twice and a
 // call with no pending marker is a no-op. The settled outcome is broadcast
 // as chat:cancel_finalized since the cancel HTTP response has long returned.
+// RebroadcastCancelledTask re-announces an already-cancelled task after a
+// post-terminal delivery landed on its row (the cancel-ack's branch name or
+// preserved-worktree error). The original task:cancelled broadcast fired at
+// cancel time, BEFORE the daemon's ack — clients may have refetched a row
+// without the delivery and will not refetch again on their own. Consumers
+// treat task:cancelled as idempotent cache invalidation, so a replay is safe.
+func (s *TaskService) RebroadcastCancelledTask(ctx context.Context, taskID pgtype.UUID) {
+	task, err := s.Queries.GetAgentTask(ctx, taskID)
+	if err != nil {
+		slog.Warn("rebroadcast cancelled task: load failed",
+			"task_id", util.UUIDToString(taskID), "error", err)
+		return
+	}
+	if task.Status != "cancelled" {
+		// A complete/fail callback already announced its own terminal event
+		// carrying the row's final fields; nothing stale to refresh.
+		return
+	}
+	s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, task)
+}
+
 func (s *TaskService) FinalizeDeferredCancelledChat(ctx context.Context, taskID pgtype.UUID) {
 	var (
 		task    db.AgentTaskQueue
@@ -2630,21 +2840,13 @@ func (s *TaskService) FinalizeDeferredCancelledChat(ctx context.Context, taskID 
 			if err != nil {
 				return fmt.Errorf("detach cancelled chat message attachments: %w", err)
 			}
-			deleted, err := qtx.DeleteUserChatMessageByTask(ctx, inputOwnerID)
+			deleted, err := deleteUserChatInput(ctx, qtx, inputOwnerID)
 			if errors.Is(err, pgx.ErrNoRows) {
 				payload.Outcome = ""
 				return nil
 			}
 			if err != nil {
 				return fmt.Errorf("delete empty cancelled chat user message: %w", err)
-			}
-			if deleted.MessageKind == protocol.ChatMessageKindOnboardingKickoff {
-				// The hidden kickoff was authored by the product, not typed by
-				// the member. Delete it like any empty cancelled input batch,
-				// but never persist it as a composer draft.
-				payload.Outcome = protocol.ChatCancelOutcomeRestored
-				payload.MessageID = util.UUIDToString(deleted.ID)
-				return nil
 			}
 			attachmentIDs := make([]pgtype.UUID, 0, len(detached))
 			for _, a := range detached {
@@ -3338,7 +3540,7 @@ func (s *TaskService) MarkTaskWaitingLocalDirectory(ctx context.Context, taskID 
 // queued chat message could be claimed in the window between the task
 // flipping to 'completed' and chat_session.session_id being refreshed,
 // causing the new task to resume against a stale (or NULL) session.
-func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, result []byte, sessionID, workDir string, sessionRolloutMissing bool, retiredSessionID string) (*db.AgentTaskQueue, error) {
+func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, result []byte, sessionID, workDir, branchName string, sessionRolloutMissing bool, retiredSessionID string) (*db.AgentTaskQueue, error) {
 	var task db.AgentTaskQueue
 	// chatAssistantMsg is the single assistant outcome row written for a chat
 	// task inside the completion transaction below. It is broadcast (chat:done)
@@ -3353,6 +3555,7 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 			Result:                result,
 			SessionID:             pgtype.Text{String: sessionID, Valid: sessionID != ""},
 			WorkDir:               pgtype.Text{String: workDir, Valid: workDir != ""},
+			BranchName:            pgtype.Text{String: branchName, Valid: branchName != ""},
 			SessionRolloutMissing: sessionRolloutMissing,
 			RetiredSessionID:      pgtype.Text{String: retiredSessionID, Valid: retiredSessionID != ""},
 		})
@@ -3634,23 +3837,27 @@ func (s *TaskService) writeChatCompletionOutcome(ctx context.Context, qtx *db.Qu
 	switch {
 	case !isEmpty:
 		params.Content = redact.Text(body)
-		// message_kind left NULL → COALESCE defaults to 'message'. The one
-		// exception: the reply to the hidden onboarding kickoff self-describes
-		// as the opening, which is what makes chat render the starter cards
-		// under it — the kickoff row itself never reaches clients (MUL-5765).
+		// message_kind left NULL → COALESCE defaults to 'message'.
+		//
+		// The one exception is now a deploy-window case. The server writes the
+		// opening directly (MUL-5827), so no new task ever produces one — but a
+		// kickoff task enqueued by the previous server can still be claimed by
+		// this one, and its reply IS that member's opening. Leaving it a plain
+		// 'message' would permanently cost that session its starter cards.
+		//
+		// Gated on "the batch is a kickoff and nothing else", which is precisely
+		// the old shape: the new kickoff rides in alongside a real member
+		// message, and stamping that turn would render the cards a second time
+		// under a reply that is not an opening.
 		//
 		// Keyed on chatInputOwnerID, not task.ID: an auto-retry clone gets a
 		// fresh id while inheriting the root's chat_input_task_id (MUL-4351),
-		// and the kickoff user row stays bound to the root. Asking about the
-		// child's own id would answer false, so an opening that only landed
-		// after a retriable failure would persist as a plain 'message' — no
-		// starter cards, and chips generated for a turn whose copy points at
-		// cards that never render.
-		kickoff, err := qtx.TaskHasOnboardingKickoffInput(ctx, chatInputOwnerID(task))
+		// and the kickoff user row stays bound to the root.
+		openingOnly, err := qtx.TaskInputIsOnboardingKickoffOnly(ctx, chatInputOwnerID(task))
 		if err != nil {
 			return nil, fmt.Errorf("check onboarding kickoff input: %w", err)
 		}
-		if kickoff {
+		if openingOnly.Bool {
 			params.MessageKind = pgtype.Text{String: protocol.ChatMessageKindOnboardingOpening, Valid: true}
 		}
 	case pendingAttachments > 0:
@@ -3738,7 +3945,7 @@ func (s *TaskService) observeChatOutputLocalPath(task db.AgentTaskQueue, body st
 // coarse bucket. Daemon callers that already produced a refined reason
 // (via classifyPoisonedError, the timeout / runtime classifier, etc.)
 // will have their value preserved untouched.
-func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, sessionID, workDir, failureReason string, sessionRolloutMissing bool, retiredSessionID string) (*db.AgentTaskQueue, error) {
+func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, sessionID, workDir, branchName, failureReason string, sessionRolloutMissing bool, retiredSessionID string) (*db.AgentTaskQueue, error) {
 	// MUL-2946: synthesise a refined reason from the error text whenever the
 	// caller didn't supply one. This is the last write-path guard against
 	// "agent_error" coarse rows ending up in agent_task_queue.failure_reason
@@ -3807,11 +4014,16 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 			return err
 		}
 		t, err := qtx.FailAgentTask(ctx, db.FailAgentTaskParams{
-			ID:                    taskID,
-			Error:                 pgtype.Text{String: errMsg, Valid: true},
-			FailureReason:         pgtype.Text{String: failureReason, Valid: failureReason != ""},
-			SessionID:             pgtype.Text{String: sessionID, Valid: sessionID != ""},
-			WorkDir:               pgtype.Text{String: workDir, Valid: workDir != ""},
+			ID:            taskID,
+			Error:         pgtype.Text{String: errMsg, Valid: true},
+			FailureReason: pgtype.Text{String: failureReason, Valid: failureReason != ""},
+			SessionID:     pgtype.Text{String: sessionID, Valid: sessionID != ""},
+			WorkDir:       pgtype.Text{String: workDir, Valid: workDir != ""},
+			// A failed run can still have produced a branch: worktree mode
+			// commits whatever the agent left before tearing the worktree down,
+			// precisely so partial work survives. Dropping the name here would
+			// leave that commit with no pointer to it.
+			BranchName:            pgtype.Text{String: branchName, Valid: branchName != ""},
 			SessionRolloutMissing: sessionRolloutMissing,
 			RetiredSessionID:      pgtype.Text{String: retiredSessionID, Valid: retiredSessionID != ""},
 		})
@@ -3906,6 +4118,22 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 		// be claimed between the status flip and this row, placing its user input
 		// before the failure it follows.
 		if t.ChatSessionID.Valid && retried == nil {
+			// This turn is dead, so anything it owned has to move on. An adopted
+			// onboarding kickoff would otherwise stay bound to a task that will
+			// never run again: the next turn would reach Mika with no onboarding
+			// context and no record that she had already greeted the member, and
+			// she would introduce herself a second time (MUL-5827). The query
+			// hands it to the session's next queued turn — including one the
+			// member queued while THIS turn was still running, which adoption at
+			// send time could not have caught.
+			//
+			// Gated on retried == nil on purpose. A retry child inherits the
+			// root's chat_input_task_id, and the kickoff stays bound to that
+			// root, so the retry still reads it — releasing here would strip
+			// the context off a turn that is about to run.
+			if err := qtx.ReleaseOnboardingKickoffFromTask(ctx, chatInputOwnerID(t)); err != nil {
+				return fmt.Errorf("release onboarding kickoff: %w", err)
+			}
 			if _, err := createAssistantChatMessage(ctx, qtx, db.CreateChatMessageParams{
 				ChatSessionID: t.ChatSessionID,
 				Role:          "assistant",
@@ -4114,7 +4342,11 @@ func ResumeUnsafeFailure(failureReason, errorText string) bool {
 	// reason-independent text guard is the load-bearing protection for both new
 	// and already persisted rows. Keep it in sync with the GetLastTaskSession /
 	// GetLastChatTaskSession resume queries.
-	if strings.Contains(lower, "could not resolve authentication method") {
+	//
+	// The phrase itself lives in taskfailure.AuthMethodUnresolved, shared with
+	// the daemon's in-turn fresh-session retry gate so the two layers cannot
+	// disagree about which errors mean "this session can never be resumed".
+	if taskfailure.AuthMethodUnresolved(errorText) {
 		return true
 	}
 	// Same defense-in-depth for the provider-agnostic empty-message shape:
@@ -4660,6 +4892,79 @@ func (s *TaskService) LoadAgentSkillBundles(ctx context.Context, agentID pgtype.
 	skills := s.LoadAgentSkills(ctx, agentID)
 	skills = append(skills, s.BuiltinSkills()...)
 	return BuildAgentSkillBundles(skills)
+}
+
+type PluginExecutionManifestData struct {
+	ID                   string                        `json:"id"`
+	SnapshotID           string                        `json:"snapshot_id,omitempty"`
+	SnapshotRevision     int64                         `json:"snapshot_revision"`
+	SnapshotDigest       string                        `json:"snapshot_digest,omitempty"`
+	ComposerVersion      string                        `json:"composer_version"`
+	SchemaVersion        int32                         `json:"schema_version"`
+	OrderedContributions []pluginruntime.CompiledEntry `json:"ordered_contributions"`
+}
+
+// LoadTaskPluginSkillBundles resolves only the immutable artifact files named
+// by the task's enqueue-time execution manifest. It deliberately does not read
+// current installation state, so disable/upgrade cannot mutate an in-flight or
+// retried run's inputs.
+func (s *TaskService) LoadTaskPluginSkillBundles(ctx context.Context, taskID pgtype.UUID) ([]AgentSkillData, []AgentSkillRefData, *PluginExecutionManifestData, error) {
+	manifest, err := s.Queries.GetPluginExecutionManifestByTask(ctx, taskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("load plugin execution manifest: %w", err)
+	}
+	entries, err := pluginruntime.ParseEntries(manifest.OrderedContributions)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	data := &PluginExecutionManifestData{
+		ID:                   util.UUIDToString(manifest.ID),
+		SnapshotID:           util.UUIDToString(manifest.SnapshotID),
+		SnapshotRevision:     manifest.SnapshotRevision,
+		SnapshotDigest:       manifest.SnapshotDigest.String,
+		ComposerVersion:      manifest.ComposerVersion,
+		SchemaVersion:        manifest.SchemaVersion,
+		OrderedContributions: entries,
+	}
+	if len(entries) == 0 {
+		return nil, nil, data, nil
+	}
+
+	skills := make([]AgentSkillData, 0, len(entries))
+	for _, entry := range entries {
+		if entry.ContributionType != plugincontract.ContributionAgentSkillV1 || entry.ArtifactFileID == "" {
+			return nil, nil, nil, fmt.Errorf("execution manifest contains unsupported plugin contribution")
+		}
+		artifactFileID, parseErr := util.ParseUUID(entry.ArtifactFileID)
+		if parseErr != nil {
+			return nil, nil, nil, fmt.Errorf("execution manifest contains invalid artifact file id")
+		}
+		artifact, getErr := s.Queries.GetPluginArtifactFile(ctx, artifactFileID)
+		if getErr != nil {
+			return nil, nil, nil, fmt.Errorf("load pinned plugin artifact: %w", getErr)
+		}
+		releaseID, parseErr := util.ParseUUID(entry.ReleaseID)
+		if parseErr != nil || artifact.ReleaseID != releaseID || artifact.Path != entry.EntryPath || artifact.Digest != entry.EntryDigest || plugincontract.DigestBytes([]byte(artifact.Content)) != entry.EntryDigest {
+			return nil, nil, nil, fmt.Errorf("pinned plugin artifact failed digest validation")
+		}
+		skills = append(skills, AgentSkillData{
+			ID:          "plugin:" + entry.ContributionID,
+			Source:      skillbundle.SourcePlugin,
+			Name:        entry.ContributionKey,
+			Description: entry.Description,
+			Content:     artifact.Content,
+		})
+	}
+	bundles, refs := BuildAgentSkillBundles(skills)
+	for i := range refs {
+		if refs[i].Hash != entries[i].SkillBundleHash || refs[i].SizeBytes != entries[i].SkillSizeBytes || refs[i].FileCount != entries[i].SkillFileCount {
+			return nil, nil, nil, fmt.Errorf("pinned plugin skill bundle failed manifest validation")
+		}
+	}
+	return bundles, refs, data, nil
 }
 
 func BuildAgentSkillBundles(skills []AgentSkillData) ([]AgentSkillData, []AgentSkillRefData) {

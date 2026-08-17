@@ -39,6 +39,7 @@ import {
 } from "@multica/ui/components/ui/dropdown-menu";
 import { ActorAvatar } from "../actor-avatar";
 import { AttributionBadge } from "../../issues/components/attribution-badge";
+import { cancelReasonLabel } from "../../agents/components/tabs/task-failure";
 import { RichContent } from "../../rich-content";
 import { api } from "@multica/core/api";
 import {
@@ -48,7 +49,7 @@ import {
   type TranscriptSortDirection,
 } from "@multica/core/agents/stores";
 import type { AgentTask, Agent, AgentRuntime } from "@multica/core/types/agent";
-import { runtimeDisplayName } from "@multica/core/runtimes";
+import { runtimeDisplayName, providerDisplayName } from "@multica/core/runtimes";
 import { useCustomPricingStore } from "@multica/core/runtimes/custom-pricing-store";
 import { redactSecrets } from "./redact";
 import {
@@ -232,6 +233,7 @@ export function AgentTranscriptDialog({
   const [elapsed, setElapsed] = useState("");
   const [copied, setCopied] = useState(false);
   const [copiedWorkdir, setCopiedWorkdir] = useState(false);
+  const [copiedBranch, setCopiedBranch] = useState(false);
   const [agentInfo, setAgentInfo] = useState<Agent | null>(null);
   const [runtimeInfo, setRuntimeInfo] = useState<AgentRuntime | null>(null);
   // Row-level expand overrides. A row the user toggled follows the toggle; any
@@ -490,6 +492,17 @@ export function AgentTranscriptDialog({
     });
   }, [task.relative_work_dir]);
 
+  // Worktree-mode runs deliver a branch instead of edits in the working copy,
+  // so copying the name is the fastest path to `git diff <branch>`.
+  const handleCopyBranch = useCallback(() => {
+    if (!task.branch_name) return;
+    void copyText(task.branch_name).then((ok) => {
+      if (!ok) return;
+      setCopiedBranch(true);
+      setTimeout(() => setCopiedBranch(false), 2000);
+    });
+  }, [task.branch_name]);
+
   const handleCopyAll = useCallback(() => {
     // Copy the full body of each event (not the truncated row summary), with
     // the same secret redaction the detail view applies.
@@ -553,13 +566,21 @@ export function AgentTranscriptDialog({
             {t(($) => $.transcript.status_failed)}
           </span>
         );
-      case "cancelled":
+      case "cancelled": {
+        // A server-cancelled run (worktree claim gate, preserved-work
+        // delivery) carries a persisted reason the user must act on; surface
+        // it on the badge instead of a bare "Cancelled". User-initiated
+        // cancels have no reason and keep the plain label.
+        const cancelReason = cancelReasonLabel(task);
         return (
-          <span className={cn(base, "bg-muted text-muted-foreground")}>
+          <span className={cn(base, "bg-muted text-muted-foreground")} title={task.error ?? undefined}>
             <XCircle className="h-3 w-3" />
-            {t(($) => $.transcript.status_cancelled)}
+            {cancelReason
+              ? `${t(($) => $.transcript.status_cancelled)} · ${cancelReason}`
+              : t(($) => $.transcript.status_cancelled)}
           </span>
         );
+      }
       case "queued":
         return (
           <span className={cn(base, "bg-muted text-muted-foreground")}>
@@ -605,7 +626,7 @@ export function AgentTranscriptDialog({
 
   // Diagnostic detail for the ⓘ popover: everything a reader needs only when
   // debugging this specific run, kept off the always-visible surface.
-  const providerLabel = runtimeInfo?.provider ? formatProvider(runtimeInfo.provider) : null;
+  const providerLabel = runtimeInfo?.provider ? transcriptProviderLabel(runtimeInfo.provider) : null;
   const createdLabel = task.created_at ? formatRunTime(task.created_at) : null;
   const startedLabel = task.started_at ? formatRunTime(task.started_at) : null;
   const completedLabel = task.completed_at ? formatRunTime(task.completed_at) : null;
@@ -632,6 +653,8 @@ export function AgentTranscriptDialog({
   const hasRunDetails =
     !!runtimeInfo ||
     !!task.relative_work_dir ||
+    !!task.branch_name ||
+    !!task.error ||
     !!createdLabel ||
     !!startedLabel ||
     !!completedLabel ||
@@ -742,6 +765,26 @@ export function AgentTranscriptDialog({
                           onCopy={handleCopyWorkdir}
                           copied={copiedWorkdir}
                           copyTitle={t(($) => $.transcript.copy_workdir)}
+                        />
+                      )}
+                      {task.branch_name && (
+                        <RunDetailRow
+                          label={t(($) => $.transcript.details_branch)}
+                          value={task.branch_name}
+                          mono
+                          onCopy={handleCopyBranch}
+                          copied={copiedBranch}
+                          copyTitle={t(($) => $.transcript.copy_branch)}
+                        />
+                      )}
+                      {/* The full persisted error, for failed AND
+                          server-cancelled runs — this is where "which
+                          worktree holds my preserved work" and "which
+                          machine needs upgrading" are actually readable. */}
+                      {task.error && (
+                        <RunDetailRow
+                          label={t(($) => $.transcript.details_reason)}
+                          value={task.error}
                         />
                       )}
                       {createdLabel && (
@@ -1061,6 +1104,22 @@ function SortDirectionToggle({ value, onChange, labels }: SortDirectionTogglePro
   );
 }
 
+// Provider slugs this view names differently from the runtime list. The daemon
+// has no display-name override for Claude, so the shared formatter answers
+// "Claude" — but a run's diagnostics have always named the tool "Claude Code",
+// and `claude-code` is a legacy provider value still present on older tasks
+// (title-casing it alone would read as "Claude-code"). Every other provider
+// defers to the shared formatter so this row cannot drift from the runtime
+// list the way it did before (#5260).
+const TRANSCRIPT_PROVIDER_LABELS: Record<string, string> = {
+  claude: "Claude Code",
+  "claude-code": "Claude Code",
+};
+
+function transcriptProviderLabel(provider: string): string {
+  return TRANSCRIPT_PROVIDER_LABELS[provider.toLowerCase()] ?? providerDisplayName(provider);
+}
+
 // ─── Facts line separator ───────────────────────────────────────────────────
 
 function FactDot() {
@@ -1069,16 +1128,6 @@ function FactDot() {
       ·
     </span>
   );
-}
-
-function formatProvider(provider: string): string {
-  const map: Record<string, string> = {
-    claude: "Claude Code",
-    "claude-code": "Claude Code",
-    codex: "Codex",
-    pi: "Pi",
-  };
-  return map[provider.toLowerCase()] ?? provider;
 }
 
 // ─── Timeline bar (colored segments) ────────────────────────────────────────
