@@ -2,14 +2,13 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "@multica/core/auth";
 import {
   paths,
   resolvePostAuthDestination,
   useHasOnboarded,
 } from "@multica/core/paths";
-import { workspaceListOptions } from "@multica/core/workspace/queries";
+import { useWorkspaceList } from "@multica/core/workspace";
 
 /**
  * Legacy onboarding route. First-run onboarding is bypassed, so this route
@@ -23,8 +22,7 @@ export default function OnboardingPage() {
   const user = useAuthStore((s) => s.user);
   const isLoading = useAuthStore((s) => s.isLoading);
   const hasOnboarded = useHasOnboarded();
-  const { data: workspaces = [], isFetched: workspacesFetched } = useQuery({
-    ...workspaceListOptions(),
+  const { workspaces, ready: workspacesReady } = useWorkspaceList({
     enabled: !!user,
   });
   useEffect(() => {
@@ -32,9 +30,9 @@ export default function OnboardingPage() {
       if (!isLoading && !user) router.replace(paths.login());
       return;
     }
-    if (!workspacesFetched) return;
+    if (!workspacesReady) return;
     router.replace(resolvePostAuthDestination(workspaces, hasOnboarded));
-  }, [isLoading, user, hasOnboarded, workspacesFetched, workspaces, router]);
+  }, [isLoading, user, hasOnboarded, workspacesReady, workspaces, router]);
 
   return null;
 }

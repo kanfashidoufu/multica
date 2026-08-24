@@ -290,6 +290,17 @@ func TestImportUpdatesExistingIssueDescriptionFromRecord(t *testing.T) {
 	if second.Issue.Status != changed.Status || second.Issue.Priority != changed.Priority {
 		t.Fatalf("status/priority changed on mirror update: got %q/%q want %q/%q", second.Issue.Status, second.Issue.Priority, changed.Status, changed.Priority)
 	}
+	if second.Issue.Revision != changed.Revision+1 {
+		t.Fatalf("mirror update revision = %d, want %d", second.Issue.Revision, changed.Revision+1)
+	}
+
+	third, err := importer.Import(ctx, req)
+	if err != nil {
+		t.Fatalf("Import third: %v", err)
+	}
+	if third.Issue.Revision != second.Issue.Revision {
+		t.Fatalf("idempotent mirror revision = %d, want %d", third.Issue.Revision, second.Issue.Revision)
+	}
 }
 
 func TestCleanBugHTMLTextPreservesInlineHTMLImages(t *testing.T) {

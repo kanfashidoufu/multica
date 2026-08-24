@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"math/rand"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -120,7 +121,21 @@ func repoCheckoutModeFor(provider, goos string) string {
 var (
 	taskPrepareLeaseRefresh = 15 * time.Second
 	taskPrepareLeaseTimeout = 10 * time.Second
+	errInvalidTaskIdentity  = errors.New("invalid task identity")
 )
+
+func validateTaskIdentity(task Task) error {
+	if strings.TrimSpace(task.AgentID) == "" {
+		return fmt.Errorf("%w: task %s has no authoritative agent_id", errInvalidTaskIdentity, task.ID)
+	}
+	if task.Agent == nil {
+		return fmt.Errorf("%w: task %s has no agent payload (agent_id=%s)", errInvalidTaskIdentity, task.ID, task.AgentID)
+	}
+	if task.Agent.ID != task.AgentID {
+		return fmt.Errorf("%w: task %s agent_id=%s but agent.id=%s", errInvalidTaskIdentity, task.ID, task.AgentID, task.Agent.ID)
+	}
+	return nil
+}
 
 func taskScopedAuthToken(task Task) (string, error) {
 	token := strings.TrimSpace(task.AuthToken)
@@ -185,14 +200,15 @@ const (
 // reportTerminalTask gives the durable outbox one insertion point without
 // revisiting every task exit when it is added.
 type terminalTaskReport struct {
-	kind          terminalTaskReportKind
-	taskID        string
-	output        string
-	branchName    string
-	errorMessage  string
-	sessionID     string
-	workDir       string
-	failureReason string
+	kind           terminalTaskReportKind
+	taskID         string
+	output         string
+	branchName     string
+	errorMessage   string
+	sessionID      string
+	workDir        string
+	durableWorkDir string
+	failureReason  string
 	// sessionRolloutMissing is true when the daemon withheld this task's Codex
 	// session because its rollout was not in the store (MUL-5305). The server
 	// clears the resume pointer and flags the continuity gap for the next claim.
@@ -406,7 +422,13 @@ type Daemon struct {
 	// Guarded by d.mu — deliberately the same lock every register-response
 	// apply takes, which is what totally orders "record the verdict" against
 	// "apply a response" instead of merely narrowing the window between them.
-	demotedProviders map[string]demotionRecord // provider -> the rejected version and when it was rejected
+	demotedProviders map[string]demotionRecord // provider -> the evidence that condemned it and when
+
+	// notExecutableSince is when each provider was FIRST observed to be
+	// unrunnable, for the confirmation window in confirmNotExecutable. Entries
+	// are cleared by the round that finds the provider healthy again. Guarded
+	// by d.mu.
+	notExecutableSince map[string]time.Time
 
 	// demotionSeq is a monotonic counter stamped onto each demotion record so a
 	// probe round can tell whether its evidence predates a verdict.
@@ -544,6 +566,13 @@ type Daemon struct {
 	activeStoresCond *sync.Cond      // signalled when an in-flight store deletion finishes, so a blocked markActive can proceed
 	activeStores     map[string]int  // persistent store path (per-conversation Codex sessions, per-agent Hermes memories) -> live-task refcount; guards the store from GC mid-task (MUL-4424)
 	deletingStores   map[string]bool // store paths a GC delete has reserved; markActive waits these out so a task never mounts a store mid-removal
+
+	// repoCheckoutTasks binds the localhost /repo/checkout endpoint to the
+	// task-scoped bearer token of a currently running agent. The request body is
+	// never an identity source: workspace, task, agent, and allowed workdir all
+	// come from this registry.
+	repoCheckoutTasksMu sync.RWMutex
+	repoCheckoutTasks   map[string]activeRepoCheckoutTask
 
 	// localPathLocks serialises agent tasks whose project resource is a
 	// local_directory pinned to this daemon. Two tasks targeting the same
@@ -1060,7 +1089,7 @@ func (d *Daemon) adoptAgentPath(ctx context.Context, provider, command, newPath,
 	// older or broken install must not be launched under the daemon's stale
 	// version policy, and must not slip past the minimum-version gate that the
 	// registration path applies (MUL-4486 review).
-	version, err := detectAgentVersion(ctx, newPath)
+	version, err := detectAgentVersion(ctx, agent.Command{Path: newPath})
 	if err != nil {
 		d.logger.Warn("re-resolved agent executable failed version detection; keeping pinned path",
 			"provider", provider, "command", command, "new_path", newPath, "error", err)
@@ -1478,12 +1507,12 @@ func (d *Daemon) applyRegisterResponseInPlace(workspaceID string, resp *Register
 // ID rotation is still handled: when the response returns a different ID for a
 // built-in provider the workspace already had, that specific old ID is replaced
 // rather than accumulating a duplicate heartbeat.
-func (d *Daemon) mergeBuiltinRegisterResponse(workspaceID string, resp *RegisterResponse) (newIDs, rejectedIDs []string, ok bool) {
+func (d *Daemon) mergeBuiltinRegisterResponse(workspaceID string, resp *RegisterResponse) (newIDs []string, revived revivedRuntimes, ok bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	ws, exists := d.workspaces[workspaceID]
 	if !exists {
-		return nil, nil, false
+		return nil, revivedRuntimes{}, false
 	}
 
 	// Index the workspace's current built-in runtimes by provider so a rotated
@@ -1510,7 +1539,7 @@ func (d *Daemon) mergeBuiltinRegisterResponse(workspaceID string, resp *Register
 		// guard in applyRegisterResponseInPlace. The caller deregisters the row
 		// the server upserted back.
 		if d.providerDemotedLocked(rt.Provider) {
-			rejectedIDs = append(rejectedIDs, rt.ID)
+			revived.add(d, rt.ID, rt.Provider)
 			continue
 		}
 		d.runtimeIndex[rt.ID] = rt
@@ -1543,7 +1572,7 @@ func (d *Daemon) mergeBuiltinRegisterResponse(workspaceID string, resp *Register
 	if len(resp.Settings) > 0 {
 		ws.settings = resp.Settings
 	}
-	return newIDs, rejectedIDs, true
+	return newIDs, revived, true
 }
 
 // providerDemotedLocked reports whether provider is currently held below the
@@ -1555,16 +1584,79 @@ func (d *Daemon) providerDemotedLocked(provider string) bool {
 	return demoted
 }
 
-// demotionRecord is a confirmed below-minimum verdict: the version that was
-// rejected, plus the demotionSeq tick that establishes when it was reached.
-type demotionRecord struct {
-	version string
-	seq     uint64
+// demotedOfflineReasonLocked returns the structured cause recorded for a
+// demoted provider, or nil when the verdict carries none (below-minimum) or the
+// provider is not demoted. Callers must hold d.mu.
+func (d *Daemon) demotedOfflineReasonLocked(provider string) *RuntimeOfflineReason {
+	record, demoted := d.demotedProviders[provider]
+	if !demoted {
+		return nil
+	}
+	return record.offline
 }
 
-// markProvidersDemoted records a CONFIRMED below-minimum verdict so a register
-// response still in flight cannot revive the provider. Callers must hold d.mu.
-func (d *Daemon) markProvidersDemotedLocked(providers map[string]string) {
+// revivedRuntimes are the rows a register response brought back for a provider
+// the daemon has already condemned: the ids to take offline again, and the
+// cause to re-attach per row because that register's upsert just overwrote it.
+type revivedRuntimes struct {
+	ids     []string
+	reasons map[string]RuntimeOfflineReason
+}
+
+// reasonsFor narrows the causes to the rows actually being deregistered. The
+// caller re-checks tracking first — a row that came back legitimately in the
+// meantime is dropped from the list — and sending a cause for a row we are no
+// longer taking offline would attach it to a healthy runtime.
+func (r revivedRuntimes) reasonsFor(runtimeIDs []string) map[string]RuntimeOfflineReason {
+	if len(r.reasons) == 0 {
+		return nil
+	}
+	out := make(map[string]RuntimeOfflineReason, len(runtimeIDs))
+	for _, id := range runtimeIDs {
+		if reason, ok := r.reasons[id]; ok {
+			out[id] = reason
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// add records one revived row. Callers must hold d.mu (it reads the demotion
+// record), and it is a no-op for a provider with no structured cause — those
+// rows still need deregistering, they just have nothing to re-attach.
+func (r *revivedRuntimes) add(d *Daemon, runtimeID, provider string) {
+	r.ids = append(r.ids, runtimeID)
+	reason := d.demotedOfflineReasonLocked(provider)
+	if reason == nil {
+		return
+	}
+	if r.reasons == nil {
+		r.reasons = make(map[string]RuntimeOfflineReason, 1)
+	}
+	r.reasons[runtimeID] = *reason
+}
+
+// demotionRecord is a confirmed verdict about the binary on disk: the evidence
+// that produced it (the rejected version, or why the CLI could not be run),
+// plus the demotionSeq tick that establishes when it was reached.
+//
+// offline is the structured half, kept because the server can lose it. A
+// register sent before the verdict still upserts the runtime row, and that
+// upsert overwrites metadata wholesale — so the reason this daemon just stored
+// is gone, and the cleanup that takes the revived row offline again has to
+// re-attach it. Without that the server ends up "offline, no reason", which
+// downgrades the refusal back to "wait for the machine" (MUL-6164).
+type demotionRecord struct {
+	evidence string
+	offline  *RuntimeOfflineReason
+	seq      uint64
+}
+
+// markProvidersDemoted records a CONFIRMED verdict so a register response still
+// in flight cannot revive the provider. Callers must hold d.mu.
+func (d *Daemon) markProvidersDemotedLocked(providers map[string]runtimeVerdict) {
 	if len(providers) == 0 {
 		return
 	}
@@ -1574,9 +1666,53 @@ func (d *Daemon) markProvidersDemotedLocked(providers map[string]string) {
 	// One tick per verdict batch: every record written here is newer than any
 	// probe round that snapshotted the counter before this call.
 	d.demotionSeq++
-	for provider, version := range providers {
-		d.demotedProviders[provider] = demotionRecord{version: version, seq: d.demotionSeq}
+	for provider, verdict := range providers {
+		d.demotedProviders[provider] = demotionRecord{
+			evidence: verdict.reason,
+			offline:  verdict.offline,
+			seq:      d.demotionSeq,
+		}
 	}
+}
+
+// notExecutableConfirmWindow is how long a "the OS will not run this file"
+// verdict must keep reproducing before the daemon acts on it.
+//
+// The verdict itself is deterministic, but the file is not: the repair we tell
+// users to run (`node <pkg>/install.cjs`) overwrites the bin entry in place, and
+// a probe that lands mid-copy sees a truncated file. Requiring a second sighting
+// this far apart makes an overwrite window impossible to mistake for a broken
+// install, and costs a genuinely broken install only one extra probe round.
+// A var so tests can collapse the wait.
+var notExecutableConfirmWindow = time.Minute
+
+// confirmNotExecutable records that this round found provider unrunnable and
+// reports whether the verdict is now old enough to act on.
+//
+// The first sighting only starts the clock. Two sightings are required no matter
+// how the window is configured, so concurrent probe rounds — four callers reach
+// detectBuiltinRuntimes — cannot combine into an instant demotion.
+func (d *Daemon) confirmNotExecutable(provider string, now time.Time) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	first, seen := d.notExecutableSince[provider]
+	if !seen {
+		if d.notExecutableSince == nil {
+			d.notExecutableSince = make(map[string]time.Time, 1)
+		}
+		d.notExecutableSince[provider] = now
+		return false
+	}
+	return now.Sub(first) >= notExecutableConfirmWindow
+}
+
+// clearNotExecutable forgets the pending verdict for a provider that probed OK,
+// so a later unrelated failure starts its own confirmation window instead of
+// inheriting a stale one.
+func (d *Daemon) clearNotExecutable(provider string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.notExecutableSince, provider)
 }
 
 // demotionSeqSnapshot returns the current demotion counter. A probe round takes
@@ -1614,13 +1750,13 @@ func (d *Daemon) clearProviderDemotions(providers []string, sampledAfter uint64)
 			continue
 		}
 		if record.seq > sampledAfter {
-			d.logger.Info("keeping below-minimum hold: this probe round started before the verdict",
-				"provider", provider, "rejected_version", record.version)
+			d.logger.Info("keeping demotion hold: this probe round started before the verdict",
+				"provider", provider, "verdict", record.evidence)
 			continue
 		}
 		delete(d.demotedProviders, provider)
-		d.logger.Info("agent CLI is back at or above the minimum supported version",
-			"provider", provider, "rejected_version", record.version)
+		d.logger.Info("agent CLI is usable again",
+			"provider", provider, "previous_verdict", record.evidence)
 	}
 }
 
@@ -1679,7 +1815,7 @@ func (d *Daemon) reregisterWorkspaceAfterRuntimeGone(ctx context.Context, worksp
 		// runtime_gone trigger only deleted its own. Eagerly mark those offline,
 		// matching the drift path, instead of leaving them claimable until the
 		// stale-heartbeat sweep.
-		d.deregisterDroppedRuntimes(ctx, workspaceID, droppedIDs, "runtime_gone recovery")
+		d.deregisterDroppedRuntimes(ctx, workspaceID, droppedIDs, "runtime_gone recovery", nil)
 		return nil
 	})
 	if err != nil {
@@ -1917,7 +2053,7 @@ func (d *Daemon) deregisterRuntimes() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := d.client.Deregister(ctx, runtimeIDs); err != nil {
+	if err := d.client.Deregister(ctx, runtimeIDs, nil); err != nil {
 		d.logger.Warn("failed to deregister runtimes on shutdown", "error", err)
 	} else {
 		d.logger.Info("deregistered runtimes", "count", len(runtimeIDs))
@@ -2056,24 +2192,66 @@ var runtimeVersionProbeRetryDelay = 500 * time.Millisecond
 // Overridable for tests.
 var runtimeVersionProbeRetryWindow = time.Second
 
-// builtinProbeVerdict distinguishes the two ways a provider can fail its probe,
+// builtinProbeVerdict distinguishes the ways a provider can fail its probe,
 // which callers must treat differently.
 //
 // "Could not read a version" is transient by construction — the CLI was busy,
 // mid-upgrade, or fork/exec hiccuped — so the right response is to leave
-// whatever is registered alone and try again. "Read a version and it is below
-// the minimum supported one" is a confirmed verdict about a binary that is on
-// disk right now, and leaving it registered means the daemon keeps handing it
-// work it cannot run correctly. Collapsing both into one bool made the second
-// case indistinguishable from a hiccup, which is what let a downgraded CLI keep
-// claiming tasks.
+// whatever is registered alone and try again. The other two are confirmed
+// verdicts about a binary that is on disk right now, and leaving either
+// registered means the daemon keeps handing work to a CLI it has already proven
+// it cannot use: "read a version and it is below the minimum supported one",
+// and "the OS refuses to execute the file at all". Collapsing these into one
+// bool made a confirmed verdict indistinguishable from a hiccup, which is what
+// let a downgraded CLI keep claiming tasks.
 type builtinProbeVerdict int
 
 const (
 	builtinProbeOK builtinProbeVerdict = iota
 	builtinProbeUnavailable
 	builtinProbeBelowMinimum
+	// builtinProbeNotExecutable: the file resolved, but the OS rejected it as
+	// not a runnable program (an npm placeholder stub whose postinstall was
+	// blocked is the case in the field — MUL-6164). Deterministic in the same
+	// sense as below-minimum: the same bytes will be refused every time until
+	// someone reinstalls, so retrying is not what fixes it.
+	builtinProbeNotExecutable
 )
+
+// runtimeVerdict is one provider's confirmed verdict: the human reason that
+// goes to /health and the daemon log, plus — when the cause is one the user has
+// to act on — the structured record the server stores on the runtime row.
+//
+// The two halves are deliberately separate. The reason is prose for an operator
+// reading logs; offline is a stable code plus a repair command for clients,
+// which localize their own sentence around it. dispatch/reason.go's rule is
+// that a reason code is decided at its source and never reverse-engineered from
+// a human-readable string, and this is that source.
+type runtimeVerdict struct {
+	reason  string
+	offline *RuntimeOfflineReason
+}
+
+// newRuntimeVerdict pairs a probe verdict with what the server needs to know
+// about it. Only a verdict the user must repair carries an offline reason: a
+// below-minimum CLI keeps today's behaviour (the runtime goes offline and work
+// queues) because changing when THAT blocks a trigger is a separate product
+// decision from this one.
+//
+// execPath is the pinned entry point, which is the right path for this verdict:
+// a file the OS refuses to execute is present, so the self-heal that would have
+// re-resolved a vanished path never runs, and the probe failed on this exact
+// file.
+func newRuntimeVerdict(verdict builtinProbeVerdict, reason, execPath string) runtimeVerdict {
+	if verdict != builtinProbeNotExecutable {
+		return runtimeVerdict{reason: reason}
+	}
+	offline := &RuntimeOfflineReason{Code: RuntimeOfflineCodeNotExecutable, Detail: reason}
+	if repair, ok := agent.ExecFormatRepairFor(execPath); ok {
+		offline.Repair = &repair
+	}
+	return runtimeVerdict{reason: reason, offline: offline}
+}
 
 // probeBuiltinRuntime resolves and version-detects one built-in provider,
 // retrying a fast failure up to runtimeVersionProbeAttempts times. The verdict
@@ -2142,7 +2320,7 @@ func (d *Daemon) probeBuiltinRuntime(ctx context.Context, name string, entry Age
 				"name", name, "version", heal.rejected.Detected, "error", heal.rejected.Error())
 			return heal.rejected.Detected, heal.rejected.Error(), builtinProbeBelowMinimum
 		}
-		version, err := detectAgentVersion(ctx, resolved.Path)
+		version, err := detectAgentVersion(ctx, agent.Command{Path: resolved.Path})
 		if err != nil {
 			lastErr = err
 			if time.Since(startedAt) >= runtimeVersionProbeRetryWindow {
@@ -2192,6 +2370,18 @@ func (d *Daemon) probeBuiltinRuntime(ctx context.Context, name string, entry Age
 		d.logger.Debug("agent version detected", "name", name, "version", version, "path", resolved.Path)
 		return version, "", builtinProbeOK
 	}
+	// The OS refusing to execute the file is not a failed probe, it is a
+	// finding: the CLI is installed, resolvable, and unrunnable. Report it as
+	// its own verdict so the caller can take the runtime offline instead of
+	// keeping it online for a binary that cannot start (MUL-6164). The
+	// diagnosis attached in pkg/agent rides along as the reason, so /health
+	// carries the repair command and not just the errno.
+	if agent.IsExecFormatError(lastErr) {
+		d.logger.Warn("skip registering runtime: agent CLI is not executable on this machine",
+			"name", name, "attempts", attempts, "error", lastErr)
+		return "", fmt.Sprintf("agent CLI is not executable: %v", lastErr), builtinProbeNotExecutable
+	}
+
 	d.logger.Warn("skip registering runtime", "name", name, "attempts", attempts, "error", lastErr)
 	reason := "version detection failed"
 	if lastErr != nil {
@@ -2225,8 +2415,8 @@ func (d *Daemon) probeBuiltinRuntime(ctx context.Context, name string, entry Age
 // batch of workspaces at once calls this ONCE and passes the payload to
 // registerRuntimesForWorkspaceBatch for each workspace (MUL-5225).
 //
-// The second return value is THIS round's below-minimum verdicts, provider to
-// the version that was read and rejected. It is returned rather than read back
+// The second return value is THIS round's confirmed verdicts, provider to the
+// evidence against it. It is returned rather than read back
 // out of skippedAgents because that pair is a diagnostic snapshot of whichever
 // round published last: four different goroutines call this (the discovery
 // loop, the workspace sync, a runtime_gone re-register, a profile drift
@@ -2242,7 +2432,7 @@ func (d *Daemon) probeBuiltinRuntime(ctx context.Context, name string, entry Age
 // payload because the probe failed, which is transient — tearing a working
 // runtime down over it is exactly what the unavailable/below-minimum verdict
 // split exists to prevent. Only a below-minimum verdict may demote.
-func (d *Daemon) detectBuiltinRuntimes(ctx context.Context) ([]map[string]string, map[string]string, map[string]string) {
+func (d *Daemon) detectBuiltinRuntimes(ctx context.Context) ([]map[string]string, map[string]runtimeVerdict, map[string]string) {
 	type detected struct {
 		name    string
 		version string
@@ -2255,7 +2445,7 @@ func (d *Daemon) detectBuiltinRuntimes(ctx context.Context) ([]map[string]string
 		mu          sync.Mutex
 		results     []detected
 		skipped     = map[string]string{}
-		belowMin    = map[string]string{}
+		demotable   = map[string]runtimeVerdict{}
 		unavailable = map[string]string{}
 		g           errgroup.Group
 	)
@@ -2265,16 +2455,25 @@ func (d *Daemon) detectBuiltinRuntimes(ctx context.Context) ([]map[string]string
 		g.Go(func() error {
 			version, reason, verdict := d.probeBuiltinRuntime(ctx, name, entry)
 			if verdict != builtinProbeOK {
+				// A not-executable verdict is deterministic, but the file can be
+				// unreadable for a moment while an installer overwrites it in
+				// place — which is exactly the repair we are telling users to
+				// run. Demote only once the verdict has survived a second probe
+				// a confirmation window later; until then it is treated as
+				// transient, which costs one more round and nothing else.
+				demote := verdict == builtinProbeBelowMinimum ||
+					(verdict == builtinProbeNotExecutable && d.confirmNotExecutable(name, time.Now()))
 				mu.Lock()
 				skipped[name] = reason
-				if verdict == builtinProbeBelowMinimum {
-					belowMin[name] = version
+				if demote {
+					demotable[name] = newRuntimeVerdict(verdict, reason, entry.Path)
 				} else {
 					unavailable[name] = reason
 				}
 				mu.Unlock()
 				return nil
 			}
+			d.clearNotExecutable(name)
 			mu.Lock()
 			results = append(results, detected{name: name, version: version})
 			mu.Unlock()
@@ -2320,7 +2519,7 @@ func (d *Daemon) detectBuiltinRuntimes(ctx context.Context) ([]map[string]string
 			"status":  "online",
 		})
 	}
-	return runtimes, belowMin, unavailable
+	return runtimes, demotable, unavailable
 }
 
 // cloneRuntimeEntries deep-copies a registration runtime payload. Callers that
@@ -2370,29 +2569,30 @@ func (d *Daemon) registerRuntimesForWorkspaceLocked(ctx context.Context, workspa
 // transient, so dropping the rows would tear a working runtime down over one
 // failed probe.
 //
-// Below-minimum is the half that is easy to get wrong, because the verdict IS
-// confirmed — a version was read and rejected. What is missing on these paths is
-// not the evidence but the authority to act on it. Taking a runtime offline for
-// being too old requires two things neither the runtime_gone recovery nor the
-// profile-drift refresh has: the claim barrier, so the rows are never pulled out
-// from under a task that is still executing, and a seq-stamped hold, so a
-// register sent before the verdict cannot revive the provider when it lands.
-// demoteBelowMinimumRuntimes has both and is the single owner of the demotion.
-// A path that drops the rows without them reaches the same verdict and leaves no
-// record that it did, so the next in-flight response quietly undoes it.
+// Demotable is the half that is easy to get wrong, because the verdict IS
+// confirmed — a version was read and rejected, or the OS refused to run the
+// file. What is missing on these paths is not the evidence but the authority to
+// act on it. Taking a runtime offline requires two things neither the
+// runtime_gone recovery nor the profile-drift refresh has: the claim barrier, so
+// the rows are never pulled out from under a task that is still executing, and a
+// seq-stamped hold, so a register sent before the verdict cannot revive the
+// provider when it lands. demoteUnusableRuntimes has both and is the single
+// owner of the demotion. A path that drops the rows without them reaches the
+// same verdict and leaves no record that it did, so the next in-flight response
+// quietly undoes it.
 //
-// Preserving here costs at most one refresh tick of a too-old CLI staying
+// Preserving here costs at most one refresh tick of an unusable CLI staying
 // online, which is the pre-demotion status quo rather than a new exposure.
-func preserveProvidersFromProbe(unavailable, belowMinimum map[string]string) map[string]string {
-	if len(belowMinimum) == 0 {
+func preserveProvidersFromProbe(unavailable map[string]string, demotable map[string]runtimeVerdict) map[string]string {
+	if len(demotable) == 0 {
 		return unavailable
 	}
-	preserve := make(map[string]string, len(unavailable)+len(belowMinimum))
+	preserve := make(map[string]string, len(unavailable)+len(demotable))
 	for provider, reason := range unavailable {
 		preserve[provider] = reason
 	}
-	for provider, version := range belowMinimum {
-		preserve[provider] = "below minimum supported version: " + version
+	for provider, verdict := range demotable {
+		preserve[provider] = verdict.reason
 	}
 	return preserve
 }
@@ -2614,8 +2814,14 @@ func (d *Daemon) appendProfileRuntimes(ctx context.Context, workspaceID string, 
 			}
 			resolved = r
 		}
-		// Best-effort version detection; an empty version is acceptable.
-		version, verErr := detectAgentVersion(ctx, resolved)
+		// Best-effort version detection; an empty version is acceptable. The
+		// probe carries the profile's fixed_args so a wrapper reports the
+		// version of the CLI it execs rather than its own: `ccms start q36
+		// --version` is Claude Code's version, `ccms --version` is the
+		// wrapper's, and only the former means anything to the min-version
+		// gate (GH #7046).
+		version, verErr := detectAgentVersion(ctx, agent.NewCommand(resolved,
+			agent.FilterLaunchPrefix(profile.ProtocolFamily, profile.FixedArgs, d.logger)))
 		if verErr != nil {
 			d.logger.Debug("custom runtime profile: version probe failed (registering with empty version)",
 				"workspace_id", workspaceID, "profile_id", profile.ID, "path", resolved, "error", verErr)
@@ -3080,7 +3286,7 @@ func (d *Daemon) applyProfileDriftRegistration(ctx context.Context, workspaceID 
 	// so the runtime list reflects reality immediately; a 5xx blip here is
 	// fine because the server's stale-heartbeat sweep will pick them up
 	// within ~150 s as a backstop.
-	d.deregisterDroppedRuntimes(ctx, workspaceID, droppedIDs, "profile drift")
+	d.deregisterDroppedRuntimes(ctx, workspaceID, droppedIDs, "profile drift", nil)
 
 	// Intentionally NO RecoverOrphans here: see method doc.
 	return nil
@@ -3144,7 +3350,7 @@ func (d *Daemon) convergeWorkspaceRuntimesToZero(ctx context.Context, workspaceI
 		"workspace_id", workspaceID, "deregistered_runtime_ids", dropped,
 		"preserved_providers", preserveProviders)
 
-	d.deregisterDroppedRuntimes(ctx, workspaceID, dropped, "zero-runtime convergence")
+	d.deregisterDroppedRuntimes(ctx, workspaceID, dropped, "zero-runtime convergence", nil)
 	d.notifyRuntimeSetChanged()
 	return nil
 }
@@ -3483,10 +3689,10 @@ func (d *Daemon) syncWorkspacesFromAPI(ctx context.Context, reconcileProfiles bo
 			// below-minimum must not be the way that provider comes back.
 			d.mu.Lock()
 			runtimeIDs = make([]string, 0, len(resp.Runtimes))
-			var revivedIDs []string
+			var revived revivedRuntimes
 			for _, rt := range resp.Runtimes {
 				if rt.ProfileID == "" && d.providerDemotedLocked(rt.Provider) {
-					revivedIDs = append(revivedIDs, rt.ID)
+					revived.add(d, rt.ID, rt.Provider)
 					continue
 				}
 				runtimeIDs = append(runtimeIDs, rt.ID)
@@ -3525,7 +3731,7 @@ func (d *Daemon) syncWorkspacesFromAPI(ctx context.Context, reconcileProfiles bo
 			// them offline before anything else touches this workspace — and never
 			// RecoverOrphans them below: that reports tasks for a runtime the
 			// daemon does not track and will never claim for.
-			d.deregisterRevivedRuntimes(ctx, id, revivedIDs)
+			d.deregisterRevivedRuntimes(ctx, id, revived)
 			return nil
 		})
 		if err != nil {
@@ -3865,10 +4071,16 @@ func (d *Daemon) handleModelList(ctx context.Context, rt Runtime, requestID stri
 	// path is also never re-resolved: like runTask, we don't second-guess a
 	// path the profile pinned.
 	var execPath string
+	// fixedArgs mirrors the launch prefix runTask would use. Discovery has to
+	// enumerate the CLI the profile actually runs, so a subcommand wrapper is
+	// probed as `ccms start q36 models`, not `ccms models` (GH #7046).
+	var fixedArgs []string
 	if customSpec, isCustom := d.customProfileLaunchForRuntime(rt.ID); isCustom {
 		execPath = customSpec.path
+		fixedArgs = agent.FilterLaunchPrefix(rt.Provider, customSpec.fixedArgs, d.logger)
 		d.logger.Info("model list uses custom runtime profile command",
-			"runtime_id", rt.ID, "provider", rt.Provider, "command_path", execPath)
+			"runtime_id", rt.ID, "provider", rt.Provider, "command_path", execPath,
+			"fixed_args", len(fixedArgs))
 	} else if entry, ok := d.agents()[rt.Provider]; ok {
 		// Built-in provider: self-heal a pinned executable path an in-place
 		// upgrade deleted (MUL-4486).
@@ -3882,7 +4094,7 @@ func (d *Daemon) handleModelList(ctx context.Context, rt Runtime, requestID stri
 		return
 	}
 
-	catalog, err := listModels(ctx, rt.Provider, execPath)
+	catalog, err := listModels(ctx, rt.Provider, agent.NewCommand(execPath, fixedArgs))
 	if err != nil {
 		d.reportModelListResult(ctx, rt, requestID, map[string]any{
 			"status": "failed",
@@ -4915,7 +5127,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		// run errors stay discarded: on a cancelled run they are expected
 		// noise (context canceled, killed process), and persisting them would
 		// stamp a bogus reason on every ordinary mid-run cancel.
-		ack := TaskCancelAck{BranchName: result.BranchName}
+		ack := TaskCancelAck{BranchName: result.BranchName, DurableWorkDir: result.DurableWorkDir}
 		var preserved *worktreePreservedError
 		if errors.As(err, &preserved) {
 			ack.ErrorMessage = preserved.Error()
@@ -4930,17 +5142,21 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 
 	if err != nil {
 		taskLog.Error("task failed", "error", err)
-		// runTask returned without a TaskResult, so we don't have a SessionID
-		// to forward — best we can do is record the failure.
+		// runTask may have reached worktree finalization before returning the
+		// error. Preserve any delivery metadata that defer attached to the named
+		// result, especially the actual/preserved workdir and delivered branch.
 		// MUL-2946: route the bare error string through the canonical
 		// classifier so the failure_reason column reflects the actual
 		// shape of the failure (provider 5xx, network, process crash,
 		// …) rather than the coarse legacy "agent_error" bucket.
 		if failErr := d.reportTerminalTask(ctx, terminalTaskReport{
-			kind:          terminalTaskReportFail,
-			taskID:        task.ID,
-			errorMessage:  err.Error(),
-			failureReason: taskRunFailureReason(err),
+			kind:           terminalTaskReportFail,
+			taskID:         task.ID,
+			errorMessage:   err.Error(),
+			branchName:     result.BranchName,
+			workDir:        result.WorkDir,
+			durableWorkDir: result.DurableWorkDir,
+			failureReason:  taskRunFailureReason(err),
 		}); failErr != nil {
 			taskLog.Error("fail task callback failed", "error", failErr)
 		}
@@ -4966,7 +5182,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		// completed/failed rows the complete/fail callback is the
 		// authoritative channel and a stale run's late ack must not touch
 		// them.
-		if ackErr := d.client.AckTaskCancelled(ctx, task.ID, TaskCancelAck{BranchName: result.BranchName}); ackErr != nil {
+		if ackErr := d.client.AckTaskCancelled(ctx, task.ID, TaskCancelAck{BranchName: result.BranchName, DurableWorkDir: result.DurableWorkDir}); ackErr != nil {
 			taskLog.Warn("cancel ack failed; server sweeper will finalize", "error", ackErr)
 		}
 		return
@@ -5015,6 +5231,9 @@ func (e *worktreePreservedError) Error() string { return e.err.Error() }
 func (e *worktreePreservedError) Unwrap() error { return e.err }
 
 func taskRunFailureReason(err error) string {
+	if errors.Is(err, errInvalidTaskIdentity) {
+		return taskfailure.ReasonInvalidTaskIdentity.String()
+	}
 	if errors.Is(err, errTaskPrepareTimeout) {
 		return taskfailure.ReasonTimeout.String()
 	}
@@ -5025,6 +5244,15 @@ func taskRunFailureReason(err error) string {
 	// room (MUL-5370).
 	if errors.Is(err, errSkillBundleUnavailable) {
 		return taskfailure.ReasonSkillBundleUnavailable.String()
+	}
+	// Structural, not textual: the message ends in "context deadline exceeded",
+	// which Classify routes to agent_error.provider_network — "the connection to
+	// the model provider dropped, check your network" for a stall that is purely
+	// local, plus an auto-retry of a failure that is deterministic on the host.
+	// The sentinel survives the preparation helper boundary via
+	// preparationErrorKind (#7112).
+	if errors.Is(err, execenv.ErrOpenclawCLITimeout) {
+		return taskfailure.ReasonRuntimeCLITimeout.String()
 	}
 	return taskfailure.Classify(err.Error()).String()
 }
@@ -5106,6 +5334,18 @@ func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Tas
 		return nil, false
 	}
 
+	// A conversation is not a second writer. Everything above still applied —
+	// the mode was checked, the path was validated, and the assignment stands,
+	// so this task keeps the user's directory as its working directory. Only
+	// the queueing is skipped, which is what stops a chat turn from sitting
+	// behind a 20-minute build with nothing to contribute to it (issue #7344).
+	// See localDirectoryLockExempt for why the mutex does not owe this task a
+	// slot.
+	if localDirectoryLockExempt(task) {
+		taskLog.Info("local_directory: chat task, skipping path mutex")
+		return nil, false
+	}
+
 	// While the lock is contended the daemon would otherwise sit blocked on
 	// the path mutex with no signal back from the server — the main
 	// per-task watcher only starts after the lock is acquired. If the user
@@ -5143,8 +5383,17 @@ func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Tas
 		// server status update below fails.
 		d.resourceWaitTasks.Add(1)
 		waitCounted = true
-		reason := fmt.Sprintf("local_directory %s", assignment.AbsPath)
+		// Rendered to the user, so it names the directory rather than its path
+		// (see localDirectoryAssignment.DisplayName). The absolute path stays in
+		// the daemon's own logs, which is where an operator debugging a wedged
+		// lock looks for it.
+		reason := assignment.DisplayName()
 		if holder != "" {
+			// Known rough edge: this clause is English and the client renders it
+			// inside a localized "Waiting for {reason}" label, so a zh/ja/ko user
+			// sees mixed script. Fixing it properly means sending the directory
+			// and the holder as separate fields and localizing the join on the
+			// client — worth doing if this hint grows, not for one parenthetical.
 			reason = fmt.Sprintf("%s (held by task %s)", reason, shortID(holder))
 		}
 		taskLog.Info("local_directory: waiting on path mutex", "holder", shortID(holder))
@@ -5228,6 +5477,7 @@ func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result Tas
 			branchName:            result.BranchName,
 			sessionID:             result.SessionID,
 			workDir:               result.WorkDir,
+			durableWorkDir:        result.DurableWorkDir,
 			sessionRolloutMissing: result.SessionRolloutMissing,
 			retiredSessionID:      result.RetiredSessionID,
 		})
@@ -5269,6 +5519,7 @@ func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result Tas
 			branchName:            result.BranchName,
 			sessionID:             result.SessionID,
 			workDir:               result.WorkDir,
+			durableWorkDir:        result.DurableWorkDir,
 			failureReason:         taskfailure.Classify(fallbackErrMsg).String(),
 			sessionRolloutMissing: result.SessionRolloutMissing,
 			retiredSessionID:      result.RetiredSessionID,
@@ -5296,11 +5547,12 @@ func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result Tas
 		}
 		taskLog.Info("task did not complete, reporting failure", "status", result.Status, "failure_reason", failureReason)
 		if err := d.reportTerminalTask(ctx, terminalTaskReport{
-			kind:         terminalTaskReportFail,
-			taskID:       taskID,
-			errorMessage: result.Comment,
-			sessionID:    result.SessionID,
-			workDir:      result.WorkDir,
+			kind:           terminalTaskReportFail,
+			taskID:         taskID,
+			errorMessage:   result.Comment,
+			sessionID:      result.SessionID,
+			workDir:        result.WorkDir,
+			durableWorkDir: result.DurableWorkDir,
 			// Worktree mode commits the agent's leftovers before tearing the
 			// worktree down, so a failed run routinely still has a branch. This
 			// is the case where the user most needs it: the task went wrong and
@@ -5326,9 +5578,9 @@ func (d *Daemon) reportTerminalTask(parentCtx context.Context, report terminalTa
 
 	switch report.kind {
 	case terminalTaskReportComplete:
-		return d.client.CompleteTask(ctx, report.taskID, report.output, report.branchName, report.sessionID, report.workDir, report.sessionRolloutMissing, report.retiredSessionID)
+		return d.client.CompleteTask(ctx, report.taskID, report.output, report.branchName, report.sessionID, report.workDir, report.sessionRolloutMissing, report.retiredSessionID, report.durableWorkDir)
 	case terminalTaskReportFail:
-		return d.client.FailTask(ctx, report.taskID, report.errorMessage, report.sessionID, report.workDir, report.branchName, report.failureReason, report.sessionRolloutMissing, report.retiredSessionID)
+		return d.client.FailTask(ctx, report.taskID, report.errorMessage, report.sessionID, report.workDir, report.branchName, report.failureReason, report.sessionRolloutMissing, report.retiredSessionID, report.durableWorkDir)
 	default:
 		return fmt.Errorf("unsupported terminal task report kind %d", report.kind)
 	}
@@ -5380,6 +5632,7 @@ var runtimeDisplayNameOverrides = map[string]string{
 	"qoderclicn": "Qoder CN",
 	"qwen":       "Qwen Code",
 	"qwenpaw":    "QwenPaw",
+	"mcode":      "MiniMax Code",
 }
 
 func init() {
@@ -5417,7 +5670,8 @@ func providerDisplayName(name string) string {
 // probed each one over its real launch path with a canary in the context file
 // and no inline delivery: claude 2.1.220 (CLAUDE.md), codex 0.144.6 driving the
 // app-server (AGENTS.md), opencode 1.17.7 (AGENTS.md), pi 0.67.2 (AGENTS.md),
-// hermes 0.18.2 over ACP (AGENTS.md). kiro was confirmed earlier by a kiro-cli
+// hermes 0.18.2 over ACP (AGENTS.md). MCode 0.1.2 also loads AGENTS.md by its
+// native runtime contract. kiro was confirmed earlier by a kiro-cli
 // 2.13.0 ACP smoke — see the call site. Still unprobed: grok, qoder, codebuddy.
 func providerNeedsInlineSystemPrompt(provider string) bool {
 	switch provider {
@@ -5451,8 +5705,31 @@ func providerNeedsInlineSystemPrompt(provider string) bool {
 // the conversation's session store got mounted (execenv.Environment
 // HermesSessionStore) — and false drops the resume with the same disclosure as
 // a workdir mismatch.
+// sameExistingDir reports whether two paths name the same existing directory.
+// False when either cannot be stat'd, which is the safe answer here: an absent
+// prior workdir means there is nothing to resume from.
+func sameExistingDir(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(ai, bi)
+}
+
 func gateResumeToReusedWorkdir(task *Task, taskCtx *execenv.TaskContextForEnv, envWorkDir string, sessionHomeReachable bool, taskLog *slog.Logger) bool {
-	reused := task.PriorWorkDir != "" && envWorkDir == task.PriorWorkDir && sessionHomeReachable
+	// Compare the directories, not the spelling. Reuse runs in the canonical
+	// path it validated and locked, which need not be character-identical to
+	// the PriorWorkDir the server sent — a symlinked workspaces root is enough
+	// to make them differ. A string compare would then silently drop the prior
+	// session on every follow-up task in that installation.
+	reused := task.PriorWorkDir != "" && sameExistingDir(envWorkDir, task.PriorWorkDir) && sessionHomeReachable
 	if !reused && task.PriorSessionID != "" {
 		taskLog.Info("dropping prior session: session store not reachable from this run",
 			"session_id", task.PriorSessionID,
@@ -5504,14 +5781,13 @@ func sessionHomeReachable(provider string, env *execenv.Environment, envReused b
 	return envReused
 }
 
-// shouldReusePriorWorkdir keeps the local_directory lock invariant without
-// forcing every squad-leader follow-up onto a fresh provider session. Worker
-// tasks already expose their current local-directory assignment, so their
-// existing reuse behavior remains unchanged. Leader tasks intentionally skip
-// that assignment and its lock; they may therefore reuse only directories
+// shouldReusePriorWorkdir keeps the local_directory lock and cross-agent
+// isolation invariants without forcing managed follow-ups onto a fresh
+// provider session. Every managed issue or chat task may reuse only directories
 // that resolve to the {workspace}/{task}/workdir shape, carry Prepare-time
-// managed-env provenance for the same workspace/issue/agent, and carry a
-// matching daemon task-context marker.
+// managed-env provenance for the same workspace/scope/agent, and carry a
+// matching daemon task-context marker. Other task kinds have no durable scope
+// with which to prove ownership and therefore start fresh.
 //
 // Reuse eligibility is deliberately keyed off .managed_env.json (written by
 // execenv.Prepare) and NOT .gc_meta.json (written only after the task reaches
@@ -5521,61 +5797,70 @@ func sessionHomeReachable(provider string, env *execenv.Environment, envReused b
 // terminal file raced and dropped the session (MUL-4886). Both proofs this
 // function reads — the env-root provenance and the workdir task-context marker
 // — are written at Prepare time, so neither depends on completion ordering.
-func shouldReusePriorWorkdir(task Task, localAssignment *localDirectoryAssignment, workspacesRoot string) bool {
+func shouldReusePriorWorkdir(task Task, localAssignment *localDirectoryAssignment, workspacesRoot string) (string, bool) {
 	if task.PriorWorkDir == "" || localAssignment != nil {
-		return false
-	}
-	if !task.IsLeaderTask {
-		return true
+		return "", false
 	}
 
 	root, err := filepath.EvalSymlinks(workspacesRoot)
 	if err != nil {
-		return false
+		return "", false
 	}
 	workdir, err := filepath.EvalSymlinks(task.PriorWorkDir)
 	if err != nil {
-		return false
+		return "", false
 	}
 	info, err := os.Stat(workdir)
 	if err != nil || !info.IsDir() {
-		return false
+		return "", false
 	}
 	rel, err := filepath.Rel(root, workdir)
 	if err != nil || !filepath.IsLocal(rel) {
-		return false
+		return "", false
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
 	if len(parts) != 3 || parts[0] != task.WorkspaceID || parts[1] == "" || parts[2] != "workdir" {
-		return false
+		return "", false
 	}
-	if task.AgentID == "" || task.IssueID == "" {
-		return false
+	if task.AgentID == "" || (task.IssueID == "" && task.ChatSessionID == "") {
+		return "", false
 	}
-	// Managed-env provenance is written only for non-local managed issue envs,
-	// so its presence (plus the workspace/issue/agent match) proves this is a
+	// Managed-env provenance is written only for non-local resumable envs, so
+	// its presence (plus the workspace/scope/agent match) proves this is a
 	// safe daemon-managed reuse target and not a residual local_directory path.
 	prov, err := execenv.ReadManagedEnvProvenance(filepath.Dir(workdir))
 	if err != nil || prov.ManagedBy != execenv.ManagedEnvProvenanceManagedBy ||
-		prov.WorkspaceID != task.WorkspaceID || prov.IssueID != task.IssueID ||
+		prov.WorkspaceID != task.WorkspaceID ||
 		prov.AgentID != task.AgentID {
-		return false
+		return "", false
 	}
 
 	data, err := os.ReadFile(filepath.Join(workdir, execenv.TaskContextMarkerRelPath))
 	if err != nil {
-		return false
+		return "", false
 	}
 	var marker struct {
-		ManagedBy string `json:"managed_by"`
-		AgentID   string `json:"agent_id"`
-		IssueID   string `json:"issue_id"`
+		ManagedBy     string `json:"managed_by"`
+		AgentID       string `json:"agent_id"`
+		IssueID       string `json:"issue_id"`
+		ChatSessionID string `json:"chat_session_id"`
 	}
 	if json.Unmarshal(data, &marker) != nil {
-		return false
+		return "", false
 	}
-	return marker.ManagedBy == execenv.TaskContextMarkerManagedBy &&
-		marker.AgentID == task.AgentID && marker.IssueID == task.IssueID
+	if marker.ManagedBy != execenv.TaskContextMarkerManagedBy || marker.AgentID != task.AgentID {
+		return "", false
+	}
+	if task.IssueID != "" {
+		if prov.IssueID != task.IssueID || marker.IssueID != task.IssueID {
+			return "", false
+		}
+		return workdir, true
+	}
+	if prov.ChatSessionID != task.ChatSessionID || marker.ChatSessionID != task.ChatSessionID {
+		return "", false
+	}
+	return workdir, true
 }
 
 // gateCodexResumeToRolloutPresence drops the prior Codex session when its
@@ -5769,7 +6054,15 @@ func (d *Daemon) resolveSkillBundle(ctx context.Context, task *Task, ref SkillRe
 	if err := d.skillCache.WithRefLock(task.WorkspaceID, validationRef, func() error {
 		return d.skillCache.Store(task.WorkspaceID, bundle)
 	}); err != nil {
-		return SkillData{}, fmt.Errorf("store skill bundle cache: %w", err)
+		if d.logger != nil {
+			d.logger.Warn("skill bundle cache store failed; continuing with downloaded bundle",
+				"workspace_id", task.WorkspaceID,
+				"skill_id", bundle.ID,
+				"source", bundle.Source,
+				"hash", bundle.Hash,
+				"error", err,
+			)
+		}
 	}
 	return bundle, nil
 }
@@ -5835,6 +6128,126 @@ func (d *Daemon) startTaskPrepareLeaseExtender(ctx context.Context, task Task, t
 	}
 }
 
+// lockReusablePriorEnvRoot decides whether this task may continue in a prior
+// task's env root and, if so, takes the exclusion lock on it.
+//
+// Order matters and is the point of this function. The lock WRITES a file into
+// the directory, so eligibility has to be proven first:
+// shouldReusePriorWorkdir resolves symlinks, checks the
+// {workspace}/{task}/workdir shape and verifies managed provenance, and only
+// the canonical path it returns is ever opened. Locking on
+// filepath.Dir(task.PriorWorkDir) before that would drop .task_lock into
+// whatever the path happened to point at — a symlink target outside the
+// workspaces root, or a user's own local_directory.
+//
+// The re-check under the lock closes the gap between proving eligibility and
+// acting on it. Declining is always safe: the caller falls back to a fresh
+// Prepare, which costs session continuity, not correctness.
+func (d *Daemon) lockReusablePriorEnvRoot(task Task, localAssignment *localDirectoryAssignment, heldRoot string) (*execenv.EnvRootClaim, string, os.FileInfo, bool) {
+	// Pin the workspaces root BEFORE validating anything. Opening it after,
+	// from a name validation just approved, would re-resolve that name: rename
+	// the root aside, leave a symlink to a look-alike tree, and os.Root
+	// faithfully pins the replacement. Root promises you cannot escape the tree
+	// it opened — not that it opened the tree you meant. Holding the handle
+	// first makes that ordering impossible.
+	wsRoot, err := os.OpenRoot(d.cfg.WorkspacesRoot)
+	if err != nil {
+		return nil, "", nil, false
+	}
+	defer wsRoot.Close()
+
+	workDir, ok := shouldReusePriorWorkdir(task, localAssignment, d.cfg.WorkspacesRoot)
+	if !ok {
+		return nil, "", nil, false
+	}
+	priorRoot := filepath.Dir(workDir)
+	// workDir came back through EvalSymlinks, so the root it is measured
+	// against has to be resolved the same way — otherwise a symlinked
+	// workspaces root (macOS /tmp -> /private/tmp, a home on a linked volume)
+	// makes the two look unrelated and every reuse is refused.
+	canonicalWorkspacesRoot, err := filepath.EvalSymlinks(d.cfg.WorkspacesRoot)
+	if err != nil {
+		return nil, "", nil, false
+	}
+	rel, err := filepath.Rel(canonicalWorkspacesRoot, priorRoot)
+	if err != nil || !filepath.IsLocal(rel) {
+		return nil, "", nil, false
+	}
+	// Already covered by this run's own claim (a task re-dispatched onto its
+	// own directory); taking a second lock on it would only deadlock against
+	// ourselves.
+	if priorRoot == heldRoot {
+		return nil, workDir, nil, true
+	}
+
+	// Pin the identity of the directory that just passed validation. Every
+	// later step is checked against THIS, not against whatever the name
+	// resolves to next: a path string cannot tell "the directory I validated"
+	// apart from "a different directory now answering to that name".
+	validatedInfo, err := os.Stat(priorRoot)
+	if err != nil {
+		return nil, "", nil, false
+	}
+
+	// Deterministic seam for the TOCTOU regressions: tests swap the validated
+	// directory here, between proving eligibility and taking the lock.
+	if reuseLockTestHook != nil {
+		reuseLockTestHook()
+	}
+
+	claim, lockedInfo, err := execenv.LockEnvRootForReuse(wsRoot, rel, priorRoot)
+	switch {
+	case errors.Is(err, execenv.ErrEnvRootBusy):
+		d.logger.Info("prior workdir is in use by another execution; starting a fresh environment",
+			"task", shortID(task.ID), "prior_root", filepath.Base(priorRoot))
+		return nil, "", nil, false
+	case err != nil:
+		d.logger.Warn("could not lock prior workdir; starting a fresh environment",
+			"task", shortID(task.ID), "error", err)
+		return nil, "", nil, false
+	case claim == nil:
+		return nil, "", nil, false
+	}
+	// The lock has to have landed on the directory validation approved.
+	if !os.SameFile(validatedInfo, lockedInfo) {
+		d.logger.Info("prior workdir changed identity before it could be claimed; starting a fresh environment",
+			"task", shortID(task.ID))
+		claim.Release()
+		return nil, "", nil, false
+	}
+
+	// Re-validate while holding the lock, and require the answer to be the SAME
+	// directory. Equality of the canonical path is not enough on its own: the
+	// tree can be rearranged so a different-but-equally-valid env root now
+	// answers to that name, which would leave us holding a lock on one
+	// directory while handing another to Reuse. os.SameFile compares identity,
+	// not spelling.
+	recheckedWorkDir, stillOK := shouldReusePriorWorkdir(task, localAssignment, d.cfg.WorkspacesRoot)
+	if !stillOK || recheckedWorkDir != workDir {
+		claim.Release()
+		return nil, "", nil, false
+	}
+	// ...and the directory we are about to hand to Reuse has to be that same
+	// one, so the object locked and the object used cannot diverge.
+	currentInfo, err := os.Stat(filepath.Dir(recheckedWorkDir))
+	if err != nil || !os.SameFile(lockedInfo, currentInfo) {
+		d.logger.Info("prior workdir changed identity while being claimed; starting a fresh environment",
+			"task", shortID(task.ID))
+		claim.Release()
+		return nil, "", nil, false
+	}
+	return claim, workDir, lockedInfo, true
+}
+
+// reuseLockTestHook runs between reuse eligibility validation and taking the
+// prior-root lock. Nil outside tests; the TOCTOU regressions use it to make the
+// swap deterministic instead of racing it.
+var reuseLockTestHook func()
+
+// reuseBeforeUseTestHook runs after the prior-root claim is settled and before
+// Reuse resolves that path by name. Nil outside tests.
+var reuseBeforeUseTestHook func()
+
 func (d *Daemon) prepareExecutionEnvironment(ctx context.Context, params execenv.PrepareParams) (*execenv.Environment, error) {
 	if d.executionEnvironmentCommand == nil {
 		// Focused runTask tests construct a zero-valued Daemon and keep setup
@@ -5897,7 +6310,180 @@ func skillRefFromBundle(bundle SkillData) SkillRefData {
 	}
 }
 
+// taskModelSelection is what a task actually launches with: the model
+// selector plus the capability overrides that survived validation.
+type taskModelSelection struct {
+	Model         string
+	ThinkingLevel string
+	ServiceTier   string
+}
+
+// resolveTaskModelSelection settles the model selector and its capability
+// overrides against the runtime's own model catalog, reading that catalog at
+// most once per task — and not at all when nothing needs it.
+//
+// The single read is the point. Discovery is a CLI subprocess with a 15-30s
+// ceiling, and cachedDiscovery deliberately does not memoize a result that
+// came back empty or as a fallback (#3729, MUL-5549) so a transient failure
+// can retry immediately. A logged-out or timing-out runtime therefore pays
+// that ceiling in full on every read, and a task that read the catalog once to
+// qualify its model and again to validate thinking_level would pay it twice
+// before the agent even starts (MUL-6471 review).
+//
+// Who asks for the catalog:
+//   - opencode and its DevEco fork cannot execute an unqualified selector, so
+//     a pinned model has to be resolved against the catalog before launch.
+//   - thinking_level / service_tier are catalog-owned and keyed on the
+//     catalog's own model id, so they need it whenever they are set.
+//
+// A pi task with no capability override asks for neither: pi's own resolver
+// accepts the persisted id in every shape it can take, so the daemon has
+// nothing to add and skips discovery entirely. Same for claude, codex, and any
+// task that pins no model.
+//
+// Qualification runs first because both checks below match on the catalog's
+// canonical id: an unqualified id silently fails every lookup and drops a
+// perfectly valid level (GH #7300).
+func resolveTaskModelSelection(
+	ctx context.Context,
+	provider string,
+	runtimeCmd agent.Command,
+	sel taskModelSelection,
+	taskLog *slog.Logger,
+) taskModelSelection {
+	capabilityChecksPending := sel.ThinkingLevel != "" || sel.ServiceTier != ""
+
+	read := false
+	var (
+		catalog    agent.Catalog
+		catalogErr error
+	)
+	loadCatalog := func() (agent.Catalog, error) {
+		if !read {
+			read = true
+			catalog, catalogErr = listModels(ctx, provider, runtimeCmd)
+		}
+		return catalog, catalogErr
+	}
+
+	sel.Model = qualifyTaskModel(provider, sel.Model, capabilityChecksPending, loadCatalog, taskLog)
+
+	// service_tier is catalog-owned and currently Codex-only. As with
+	// thinking_level, stale or incompatible persisted values degrade to the
+	// runtime default instead of failing the task. Catalog lookup errors pass
+	// through so a transient discovery failure does not silently disable a
+	// previously valid user choice.
+	if sel.ServiceTier != "" {
+		ok, err := agent.ValidateServiceTierWith(loadCatalog, provider, sel.Model, sel.ServiceTier)
+		if err != nil {
+			taskLog.Warn("service_tier: catalog lookup failed; passing through",
+				"provider", provider,
+				"model", sel.Model,
+				"service_tier", sel.ServiceTier,
+				"error", err,
+			)
+		} else if !ok {
+			taskLog.Warn("service_tier: not valid for this (provider, model); skipping injection",
+				"provider", provider,
+				"model", sel.Model,
+				"service_tier", sel.ServiceTier,
+			)
+			sel.ServiceTier = ""
+		}
+	}
+	// Per-model guard: the server validates the literal token against the
+	// provider's enum, but per-model gaps (Claude's `xhigh` on a non-Opus
+	// model, Codex's per-model `supported_reasoning_levels`) only resolve
+	// here, against the daemon's local CLI catalog. Invalid combinations
+	// log a warning and drop the level rather than failing the task, so a
+	// stale persisted value never blocks execution. An empty model is
+	// resolved by ValidateThinkingLevelWith to the provider's default model so
+	// default-model tasks aren't misjudged — except for codex, whose empty
+	// model follows config.toml (any model) and so fails closed, dropping the
+	// level here without a catalog read at all. Discovery errors fail open for
+	// resolved models: if we can't list models, we keep the persisted level
+	// and let the CLI object.
+	if sel.ThinkingLevel != "" {
+		ok, err := agent.ValidateThinkingLevelWith(loadCatalog, provider, sel.Model, sel.ThinkingLevel)
+		if err != nil {
+			taskLog.Warn("thinking_level: catalog lookup failed; passing through",
+				"provider", provider,
+				"model", sel.Model,
+				"thinking_level", sel.ThinkingLevel,
+				"error", err,
+			)
+		} else if !ok {
+			taskLog.Warn("thinking_level: not valid for this (provider, model); skipping injection",
+				"provider", provider,
+				"model", sel.Model,
+				"thinking_level", sel.ThinkingLevel,
+			)
+			sel.ThinkingLevel = ""
+		}
+	}
+
+	return sel
+}
+
+// qualifyTaskModel promotes a persisted model id to the canonical
+// `<provider>/<id>` selector its runtime catalog advertises, and returns the
+// model to actually launch with.
+//
+// agent.model holds whatever was persisted, and for gateway-style providers a
+// bare model id is itself slash-shaped (`claude/claude-opus-5` under provider
+// `multica-anthropic`), so the delimiter cannot tell a missing provider from a
+// present one — only the catalog knows (GH #7300).
+//
+// It reads the catalog for two distinct reasons, and neither is "because we
+// can": either the runtime refuses to launch without a qualified selector, or
+// a capability check is about to read the catalog anyway and will match
+// nothing unless the id is canonical first. When neither holds, the persisted
+// value goes to the CLI untouched and no subprocess is spawned.
+func qualifyTaskModel(
+	provider, model string,
+	capabilityChecksPending bool,
+	loadCatalog func() (agent.Catalog, error),
+	taskLog *slog.Logger,
+) string {
+	if model == "" {
+		return model
+	}
+	if !agent.ModelSelectorMustBeProviderQualified(provider) && !capabilityChecksPending {
+		return model
+	}
+	catalog, err := loadCatalog()
+	if err != nil {
+		// Same fail-open posture as the capability checks: an unreachable
+		// catalog must not stop a task whose model may well be exactly what
+		// the CLI expects.
+		taskLog.Warn("model: catalog lookup failed; using the configured model as-is",
+			"provider", provider,
+			"model", model,
+			"error", err,
+		)
+		return model
+	}
+	qualified, rewritten := agent.QualifyModelID(catalog, model)
+	if !rewritten {
+		return model
+	}
+	taskLog.Info("model: qualified against the runtime catalog",
+		"provider", provider,
+		"configured_model", model,
+		"model", qualified,
+	)
+	return qualified
+}
+
 func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot int, taskLog *slog.Logger) (taskResult TaskResult, returnErr error) {
+	// A claim carries the task-row agent id both at the top level and inside
+	// the expanded agent configuration. The top-level id is authoritative
+	// because it is also bound into the task-scoped token. Never prepare or
+	// reuse a workdir when the two identities disagree.
+	if err := validateTaskIdentity(task); err != nil {
+		return TaskResult{}, err
+	}
+
 	// Refuse to spawn an agent without a workspace. An empty workspace_id
 	// here would make MULTICA_WORKSPACE_ID empty in the agent env, and the
 	// CLI would otherwise silently fall back to the user-global config — a
@@ -5953,7 +6539,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		usesCustomProfileCommand = true
 		entry.Path = customSpec.path
 		resolvedVersion = customSpec.version
-		profileFixedArgs = customSpec.fixedArgs
+		// Filter here rather than relying on agent.New doing it, so that the
+		// launch and the catalog lookups below agree on one prefix. They share
+		// a discovery memo keyed on the command, and two spellings of the same
+		// runtime would key two entries.
+		profileFixedArgs = agent.FilterLaunchPrefix(provider, customSpec.fixedArgs, d.logger)
 		ok = true
 		d.logger.Info("task uses custom runtime profile command",
 			"task_id", task.ID, "runtime_id", task.RuntimeID,
@@ -5982,15 +6572,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	}
 
 	agentName := "agent"
-	var agentID string
 	var skills []SkillData
 	var instructions string
-	if task.Agent != nil {
-		agentID = task.Agent.ID
-		agentName = task.Agent.Name
-		skills = task.Agent.Skills
-		instructions = task.Agent.Instructions
-	}
+	agentName = task.Agent.Name
+	skills = task.Agent.Skills
+	instructions = task.Agent.Instructions
 
 	// Prepare isolated execution environment.
 	// Repos are passed as metadata only — the agent checks them out on demand
@@ -6008,7 +6594,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		// absent). Seed the brief's continuity disclosure from it; the local
 		// resume gates below only ever OR it to true, so the signal is monotonic.
 		PriorSessionResumeUnavailable:    task.PriorSessionResumeUnavailable,
-		AgentID:                          agentID,
+		AgentID:                          task.AgentID,
 		AgentName:                        agentName,
 		AgentInstructions:                instructions,
 		AgentSkills:                      convertSkillsForEnv(skills),
@@ -6055,6 +6641,21 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		}
 	}
 
+	// Claim the env root HERE, in the daemon parent, and hold it for the whole
+	// task run — the same lifetime as unmarkActiveEnvRoot above.
+	//
+	// It cannot be claimed inside preparation: production preparation runs in a
+	// short-lived helper process (prepareExecutionEnvironment ->
+	// PrepareIsolated), so a lock taken there dies with the helper and the
+	// *os.File cannot cross its JSON response back to us. Claiming there would
+	// leave the agent running with no protection at all — which is exactly the
+	// re-dispatch window this guards.
+	envClaim, err := execenv.ClaimEnvRoot(d.cfg.WorkspacesRoot, task.WorkspaceID, task.ID)
+	if err != nil {
+		return TaskResult{}, fmt.Errorf("claim execution environment: %w", err)
+	}
+	defer envClaim.Release()
+
 	// Try to reuse the workdir from a previous task on the same (agent, issue) pair.
 	var env *execenv.Environment
 	// For a built-in codex task, use the version paired with the resolved path
@@ -6086,6 +6687,49 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	var agentMcpConfig json.RawMessage
 	var effectiveMcpConfig json.RawMessage
 	var cursorMcpAuthSource string
+	remoteMCPConfig, remoteMCPDiagnostics, remoteMCPBrokers, remoteMCPErr := startTaskRemoteMCPBrokers(
+		prepareCtx, ctx, task.ID, provider, task.RemoteMCPConnections,
+		func(resolveCtx context.Context, contributionID string) (http.Header, error) {
+			return d.client.ResolveRemoteMCPCredential(resolveCtx, task.RemoteMCPDaemonToken, task.ID, contributionID)
+		},
+		taskLog,
+	)
+	if remoteMCPErr != nil {
+		return TaskResult{}, fmt.Errorf("prepare Remote MCP broker: %w", remoteMCPErr)
+	}
+	if remoteMCPBrokers != nil {
+		defer remoteMCPBrokers.Close()
+	}
+	for _, diagnostic := range remoteMCPDiagnostics {
+		taskLog.Warn("Remote MCP degraded", "reason", diagnostic)
+	}
+
+	// Agent-trigger plugin hooks, as a second local MCP server beside the
+	// broker. A failure to start it degrades to no plugin tools rather than
+	// failing the task: an agent that cannot reach a plugin should still work
+	// on the issue, which is the same rule that makes a failing tool call a
+	// tool error rather than a task error.
+	pluginHookConfig, pluginHookServer, pluginHookErr := startTaskPluginHookMCP(
+		ctx, task.ID, task.PluginHookTools,
+		func(callCtx context.Context, taskID, installationID, hookKey string, input json.RawMessage) (json.RawMessage, error) {
+			return d.client.InvokeAgentPluginHook(callCtx, task.RemoteMCPDaemonToken, taskID, installationID, hookKey, input)
+		},
+		taskLog,
+	)
+	if pluginHookErr != nil {
+		taskLog.Warn("plugin hook tools unavailable", "error", pluginHookErr)
+	}
+	if pluginHookServer != nil {
+		defer pluginHookServer.Close()
+	}
+	if len(pluginHookConfig) > 0 {
+		merged, mergeErr := mergeTaskRemoteMCPConfig(remoteMCPConfig, pluginHookConfig)
+		if mergeErr != nil {
+			taskLog.Warn("could not merge plugin hook MCP config", "error", mergeErr)
+		} else {
+			remoteMCPConfig = merged
+		}
+	}
 	if task.Agent != nil {
 		agentMcpConfig = task.Agent.McpConfig
 		effectiveMcpConfig = agentMcpConfig
@@ -6095,6 +6739,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 				"error", mergeErr,
 			)
 		} else {
+			effectiveMcpConfig = merged
+		}
+		if len(remoteMCPConfig) > 0 {
+			merged, mergeErr := mergeTaskRemoteMCPConfig(effectiveMcpConfig, remoteMCPConfig)
+			if mergeErr != nil {
+				return TaskResult{}, fmt.Errorf("merge Remote MCP broker configuration: %w", mergeErr)
+			}
 			effectiveMcpConfig = merged
 		}
 		if provider == "cursor" {
@@ -6126,6 +6777,10 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// instead of silently downgrading a user's isolation opt-in (MUL-4957).
 	var codexSandboxArgs []string
 	if provider == "codex" {
+		// profileFixedArgs still belongs in this reconstruction even though it
+		// no longer travels via ExtraArgs: it is a launch prefix now, so it is
+		// still on codex's argv, and a `-c windows.sandbox=...` written there
+		// must still be visible to the sandbox decision.
 		extraArgs := append(append([]string{}, profileFixedArgs...), defaultArgsForProvider(d.cfg, provider)...)
 		codexSandboxArgs = agent.NormalizeCodexLaunchArgs(extraArgs, agentCustomArgs, effectiveMcpConfig, d.logger)
 	}
@@ -6146,7 +6801,15 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	var hermesMemoryStore string
 	var hermesSessionStore string
 	if provider == "hermes" {
-		sel := agent.ParseHermesProfileArgs(agentCustomArgs)
+		// Resolve from the argv hermes will actually parse — launch prefix,
+		// `acp`, then the filtered custom args — which agent.HermesLaunchArgv
+		// assembles the same way the backend does. A custom runtime profile's
+		// fixed_args are the launch prefix now, so they are scanned before
+		// custom_args, and the backend's own `acp` token sits between them and
+		// participates in the scan. Approximating that argv reads a different
+		// profile than the process does, and the overlay ends up seeded from
+		// the wrong home (GH #7046).
+		sel := agent.ParseHermesProfileArgs(agent.HermesLaunchArgv(profileFixedArgs, agentCustomArgs, d.logger))
 		res := execenv.ResolveHermesProfile(agentEnvOverrides["HERMES_HOME"], sel.Name, sel.Found, sel.Inline)
 		if res.Err != nil {
 			return TaskResult{}, fmt.Errorf("resolve hermes profile: %w", res.Err)
@@ -6213,12 +6876,22 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		}
 	}
 	envReused := false
-	if shouldReusePriorWorkdir(task, localAssignment, d.cfg.WorkspacesRoot) {
+	if priorClaim, priorWorkDir, lockedPriorInfo, ok := d.lockReusablePriorEnvRoot(task, localAssignment, envClaim.RootDir()); ok {
+		defer priorClaim.Release()
+		// Deterministic seam for the last-window regression: tests swap the
+		// directory here, after the claim is settled and before Reuse resolves
+		// the path by name.
+		if reuseBeforeUseTestHook != nil {
+			reuseBeforeUseTestHook()
+		}
 		var err error
 		env, err = d.reuseExecutionEnvironment(prepareCtx, execenv.ReuseParams{
-			WorkspacesRoot:        d.cfg.WorkspacesRoot,
-			Profile:               d.cfg.Profile,
-			WorkDir:               task.PriorWorkDir,
+			WorkspacesRoot: d.cfg.WorkspacesRoot,
+			Profile:        d.cfg.Profile,
+			// The canonical path the lock was taken on. Handing Reuse the raw
+			// PriorWorkDir instead would re-resolve it, so the directory we
+			// locked and the directory we use could differ.
+			WorkDir:               priorWorkDir,
 			Provider:              provider,
 			CodexVersion:          codexVersion,
 			ResumeSessionID:       task.PriorSessionID,
@@ -6238,6 +6911,20 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		if err != nil {
 			return TaskResult{}, fmt.Errorf("reuse execution environment: %w", err)
 		}
+		// Reuse resolves priorWorkDir by name, so confirm what it actually
+		// opened is still the directory we hold the lock on. An fd cannot cross
+		// into the preparation helper process, so the name is the only thing
+		// that can be handed over; this turns "silently ran somewhere else"
+		// into "declined and started clean". See lockReusablePriorEnvRoot for
+		// what remains uncovered.
+		if env != nil && lockedPriorInfo != nil {
+			usedInfo, statErr := os.Stat(filepath.Dir(env.WorkDir))
+			if statErr != nil || !os.SameFile(lockedPriorInfo, usedInfo) {
+				taskLog.Info("reused workdir is not the directory that was claimed; starting a fresh environment",
+					"task", shortID(task.ID))
+				env = nil
+			}
+		}
 		// Reuse can decline (nil) and fall through to a fresh Prepare below.
 		// Whether it did decides whether an env-root-scoped session store — the
 		// Hermes overlay's task-local state.db — carried over from the prior task.
@@ -6246,11 +6933,14 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if env == nil {
 		var err error
 		prepParams := execenv.PrepareParams{
-			WorkspacesRoot:        d.cfg.WorkspacesRoot,
-			Profile:               d.cfg.Profile,
-			WorkspaceID:           task.WorkspaceID,
-			TaskID:                task.ID,
-			AgentName:             agentName,
+			WorkspacesRoot: d.cfg.WorkspacesRoot,
+			Profile:        d.cfg.Profile,
+			WorkspaceID:    task.WorkspaceID,
+			TaskID:         task.ID,
+			AgentName:      agentName,
+			// This run already holds the claim (envClaim above) and the reset
+			// it implies; preparation must not try to take it again.
+			EnvRootPreclaimed:     true,
 			Provider:              provider,
 			CodexVersion:          codexVersion,
 			OpenclawBin:           openclawBin,
@@ -6355,20 +7045,35 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// mid-run still hands back the branch holding its partial work instead of
 	// letting `git worktree remove --force` delete it. A failing task is
 	// exactly when the user most wants to see how far the agent got.
+	//
+	// In-place local_directory runs never enter this block: their WorkDir is
+	// already durable, so DurableWorkDir deliberately stays absent instead of
+	// duplicating the same path under two lifecycle meanings.
 	if env.LocalWorktree != nil {
 		defer func() {
+			if taskResult.WorkDir == "" {
+				taskResult.WorkDir = env.WorkDir
+			}
+			if taskResult.EnvRoot == "" {
+				taskResult.EnvRoot = env.RootDir
+			}
 			outcome, finalizeErr := env.LocalWorktree.Finalize(taskLog)
 			if outcome.Branch != "" {
 				taskResult.BranchName = outcome.Branch
 			}
 			if finalizeErr == nil {
+				// The configured local_directory becomes authoritative only after
+				// Finalize confirms the disposable task worktree is actually gone.
+				if localAssignment != nil {
+					taskResult.DurableWorkDir = localAssignment.AbsPath
+				}
 				return
 			}
-			// The agent's changes could not be committed, so Finalize kept the
-			// worktree instead of deleting them. Fail the task: a "completed"
-			// task whose branch is missing the work reads as success, and the
-			// user would never learn the changes are sitting in an env root the
-			// GC reclaims on a timer.
+			// Finalize could not complete its delivery contract, so the task
+			// worktree remains authoritative. This covers both an uncommitted
+			// change set and a committed branch whose worktree removal could not
+			// be confirmed. Fail the task: reporting success or a durable project
+			// directory here would hide the path that still needs attention.
 			//
 			// Wrapped in worktreePreservedError so the cancel path can
 			// recognise it: a cancelled task discards its result and error, but
@@ -6377,7 +7082,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			// Joined rather than replacing an earlier failure — that one is
 			// usually the more useful primary cause, but the preserved path
 			// must not be displaced by it.
-			taskLog.Error("local_directory: worktree finalize could not persist the agent's changes",
+			taskLog.Error("local_directory: worktree finalize incomplete; keeping the task worktree authoritative",
 				"error", finalizeErr, "preserved_path", outcome.PreservedPath)
 			wrapped := &worktreePreservedError{err: fmt.Errorf("local_directory worktree: %w", finalizeErr)}
 			if returnErr == nil {
@@ -6498,7 +7203,15 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if err != nil {
 		d.logger.Warn("execenv: inject runtime config failed (non-fatal)", "error", err)
 	}
-	prompt := BuildPrompt(task, provider)
+	// An exempt turn runs in the user's directory without having queued for it,
+	// so a sibling coding task may be writing to the same tree right now. That
+	// is the one thing it cannot work out from its own context — tell it.
+	// Worktree mode is excluded: there the tree is this task's private checkout.
+	var promptOptions []PromptOption
+	if localAssignment != nil && !localAssignment.UsesWorktree() && localDirectoryLockExempt(task) {
+		promptOptions = append(promptOptions, WithSharedLocalDirectory())
+	}
+	prompt := BuildPrompt(task, provider, promptOptions...)
 
 	// Pass task-scoped auth credentials and context so the spawned agent CLI
 	// can call the Multica API and the local daemon (e.g. `multica repo checkout`).
@@ -6609,6 +7322,21 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if err := configureCodexTaskShellEnvironment(provider, env.CodexHome, os.Environ(), agentEnv, agentCustomEnv, d.logger); err != nil {
 		return TaskResult{}, err
 	}
+	// The overlay is authoritative once built, so nothing on the command line
+	// may re-point HERMES_HOME out of it. Both argv regions are stripped
+	// together, against the same assembled argv the resolver read: a selection
+	// can straddle them (a prefix ending in a bare `-p` captures the backend's
+	// `acp`), which per-region stripping cannot see.
+	var hermesOverlayCustomArgs []string
+	hermesOverlayActive := provider == "hermes" && env != nil && env.HermesHome != ""
+	if hermesOverlayActive {
+		var rawCustomArgs []string
+		if task.Agent != nil {
+			rawCustomArgs = task.Agent.CustomArgs
+		}
+		profileFixedArgs, hermesOverlayCustomArgs = agent.StripHermesProfileSelectors(
+			profileFixedArgs, rawCustomArgs, d.logger)
+	}
 	// Resolve the backend through the unified runtime resolver: built-in
 	// runtime identities (e.g. "omp") dispatch through NewRuntime, protocol
 	// families go through New. This is the single production boundary — the
@@ -6616,6 +7344,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// factories stay meaning exactly one thing each.
 	backend, err := agent.ResolveBackend(provider, agent.Config{
 		ExecutablePath: entry.Path,
+		LaunchPrefix:   profileFixedArgs,
 		CLIVersion:     resolvedVersion,
 		Env:            agentEnv,
 		Logger:         d.logger,
@@ -6629,31 +7358,6 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		return TaskResult{}, fmt.Errorf("create agent backend: %w", err)
 	}
 
-	taskLog.Info("starting agent",
-		"provider", provider,
-		"workdir", env.WorkDir,
-		"model", entry.Model,
-		"reused", reused,
-	)
-	if task.PriorSessionID != "" {
-		taskLog.Info("resuming session", "session_id", task.PriorSessionID)
-	}
-
-	taskStart := time.Now()
-
-	var customArgs []string
-	extraArgs := defaultArgsForProvider(d.cfg, provider)
-	if len(profileFixedArgs) > 0 {
-		extraArgs = append(append([]string{}, profileFixedArgs...), extraArgs...)
-	}
-	var mcpConfig json.RawMessage
-	if task.Agent != nil {
-		customArgs = task.Agent.CustomArgs
-		mcpConfig = effectiveMcpConfig
-	}
-	if provider == "hermes" {
-		customArgs = hermesLaunchArgs(customArgs, env != nil && env.HermesHome != "")
-	}
 	// Two-tier model resolution: an explicit agent.model wins,
 	// then the daemon-wide MULTICA_<PROVIDER>_MODEL env var. If
 	// both are empty we deliberately pass "" through — each
@@ -6663,6 +7367,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// Baking a Go-side "recommended default" here is how the
 	// cursor regression happened — static guesses drift from
 	// whatever the upstream CLI actually accepts.
+	//
+	// Resolved before the start log rather than at first use: logging
+	// entry.Model there reported the env-var tier alone, so every task whose
+	// model came from agent.model — the common case — announced itself with an
+	// empty model and looked like the selection had been dropped (GH #7300).
 	model := ""
 	if task.Agent != nil && task.Agent.Model != "" {
 		model = task.Agent.Model
@@ -6670,64 +7379,46 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if model == "" {
 		model = entry.Model
 	}
+
+	taskLog.Info("starting agent",
+		"provider", provider,
+		"workdir", env.WorkDir,
+		"model", model,
+		"reused", reused,
+	)
+	if task.PriorSessionID != "" {
+		taskLog.Info("resuming session", "session_id", task.PriorSessionID)
+	}
+
+	taskStart := time.Now()
+
+	var customArgs []string
+	// profileFixedArgs deliberately does NOT go here. It travels as
+	// agent.Config.LaunchPrefix instead, because ExtraArgs is honoured by only
+	// six of the twenty-one backends and lands *after* the protocol flags in
+	// the ones that do — so a wrapper's subcommand was either dropped on the
+	// floor or spliced in behind `-p` (GH #7046).
+	extraArgs := defaultArgsForProvider(d.cfg, provider)
+	var mcpConfig json.RawMessage
+	if task.Agent != nil {
+		customArgs = task.Agent.CustomArgs
+		mcpConfig = effectiveMcpConfig
+	}
+	if hermesOverlayActive {
+		// Stripped above, alongside the launch prefix. A skill-less hermes task
+		// has no overlay to protect and keeps its flags untouched.
+		customArgs = hermesOverlayCustomArgs
+	}
 	thinkingLevel := ""
 	serviceTier := ""
 	if task.Agent != nil {
 		thinkingLevel = task.Agent.ThinkingLevel
 		serviceTier = task.Agent.ServiceTier
 	}
-	// service_tier is catalog-owned and currently Codex-only. As with
-	// thinking_level, stale or incompatible persisted values degrade to the
-	// runtime default instead of failing the task. Catalog lookup errors pass
-	// through so a transient discovery failure does not silently disable a
-	// previously valid user choice.
-	if serviceTier != "" {
-		ok, err := agent.ValidateServiceTier(ctx, provider, entry.Path, model, serviceTier)
-		if err != nil {
-			taskLog.Warn("service_tier: catalog lookup failed; passing through",
-				"provider", provider,
-				"model", model,
-				"service_tier", serviceTier,
-				"error", err,
-			)
-		} else if !ok {
-			taskLog.Warn("service_tier: not valid for this (provider, model); skipping injection",
-				"provider", provider,
-				"model", model,
-				"service_tier", serviceTier,
-			)
-			serviceTier = ""
-		}
-	}
-	// Per-model guard: the server validates the literal token against the
-	// provider's enum, but per-model gaps (Claude's `xhigh` on a non-Opus
-	// model, Codex's per-model `supported_reasoning_levels`) only resolve
-	// here, against the daemon's local CLI catalog. Invalid combinations
-	// log a warning and drop the level rather than failing the task, so a
-	// stale persisted value never blocks execution. An empty model is
-	// resolved by ValidateThinkingLevel to the provider's default model so
-	// default-model tasks aren't misjudged — except for codex, whose empty
-	// model follows config.toml (any model) and so fails closed, dropping the
-	// level here. Discovery errors fail open for resolved models: if we can't
-	// list models, we keep the persisted level and let the CLI object.
-	if thinkingLevel != "" {
-		ok, err := agent.ValidateThinkingLevel(ctx, provider, entry.Path, model, thinkingLevel)
-		if err != nil {
-			taskLog.Warn("thinking_level: catalog lookup failed; passing through",
-				"provider", provider,
-				"model", model,
-				"thinking_level", thinkingLevel,
-				"error", err,
-			)
-		} else if !ok {
-			taskLog.Warn("thinking_level: not valid for this (provider, model); skipping injection",
-				"provider", provider,
-				"model", model,
-				"thinking_level", thinkingLevel,
-			)
-			thinkingLevel = ""
-		}
-	}
+	selection := resolveTaskModelSelection(ctx, provider, agent.NewCommand(entry.Path, profileFixedArgs),
+		taskModelSelection{Model: model, ThinkingLevel: thinkingLevel, ServiceTier: serviceTier}, taskLog)
+	model, thinkingLevel, serviceTier = selection.Model, selection.ThinkingLevel, selection.ServiceTier
+
 	var idleWatchdogTimeout time.Duration
 	if provider == "opencode" {
 		idleWatchdogTimeout = d.cfg.OpenCodeIdleWatchdog
@@ -6805,6 +7496,20 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		return TaskResult{Status: "completed", Comment: "", WorkDir: env.WorkDir, EnvRoot: env.RootDir}, nil
 	}
 
+	// Authenticate the localhost repo-checkout endpoint with the same
+	// task-scoped token the child receives. The endpoint derives identity and
+	// branch ownership from this in-memory record instead of trusting request
+	// fields or ambient process environment. Register only for the provider
+	// execution window and always remove the credential afterwards.
+	d.registerActiveRepoCheckoutTask(agentToken, activeRepoCheckoutTask{
+		WorkspaceID: task.WorkspaceID,
+		TaskID:      task.ID,
+		AgentID:     task.AgentID,
+		AgentName:   task.Agent.Name,
+		WorkDir:     env.WorkDir,
+	})
+	defer d.clearActiveRepoCheckoutTask(agentToken)
+
 	taskLog.Debug("invoking backend",
 		"provider", provider,
 		"model", model,
@@ -6873,7 +7578,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 				execOpts.SystemPrompt = runtimeBrief
 			}
 		}
-		freshPrompt := BuildPrompt(task, provider)
+		freshPrompt := BuildPrompt(task, provider, promptOptions...)
 
 		retryResult, retryTools, retryErr := d.executeAndDrain(ctx, backend, freshPrompt, execOpts, taskLog, task.ID, env.CodexHome, &msgSeq)
 		if retryErr != nil {
@@ -8142,22 +8847,6 @@ func sanitizeAgentEnv(customEnv map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
-}
-
-// hermesLaunchArgs decides the final Hermes custom_args: with the per-task
-// overlay active, the -p/--profile flags are stripped (the overlay was seeded
-// from that profile's home and exports its own HERMES_HOME, so the flag must not
-// re-resolve the profile past it); with no overlay, the flags pass through so a
-// skill-less task's profile behavior is unchanged.
-func hermesLaunchArgs(customArgs []string, overlayActive bool) []string {
-	if !overlayActive {
-		return customArgs
-	}
-	// Strip exactly the occurrence the resolver acted on. This re-parses with the
-	// same authoritative parser used to resolve the source home, so parsing and
-	// stripping never diverge.
-	sel := agent.ParseHermesProfileArgs(customArgs)
-	return agent.StripHermesProfileArgs(customArgs, sel)
 }
 
 // hermesProviderUnconfiguredHint is appended verbatim to a "no LLM provider

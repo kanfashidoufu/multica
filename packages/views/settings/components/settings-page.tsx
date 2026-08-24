@@ -13,11 +13,13 @@ import {
   Plug,
   MessageCircle,
   Tags,
+  CircleDot,
   Keyboard,
   ListTodo,
   Zap,
   Blocks,
   CreditCard,
+  Server,
 } from "lucide-react";
 import { GitHubMark } from "./github-mark";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@multica/ui/components/ui/tabs";
@@ -42,10 +44,12 @@ import { IntegrationsTab } from "./integrations-tab";
 import { LabsTab } from "./labs-tab";
 import { NotificationsTab } from "./notifications-tab";
 import { LabelsTab } from "./labels-tab";
+import { IssueStatusesTab } from "./issue-statuses-tab";
 import { PropertiesTab } from "./properties-tab";
 import { QuickActionsTab } from "./quick-actions-tab";
 import { KeyboardShortcutsTab } from "./keyboard-shortcuts-tab";
 import { PluginsTab } from "./plugins-tab";
+import { McpTab } from "./mcp-tab";
 import { BillingTab } from "./billing-tab";
 import { CollapsedNavTrigger } from "../../layout/page-header";
 import { useT } from "../../i18n";
@@ -70,8 +74,10 @@ const WORKSPACE_TAB_KEYS = [
   "members",
   "billing",
   "labels",
+  "issue_statuses",
   "properties",
   "quick_actions",
+  "mcp",
   "plugins",
 ] as const;
 const WORKSPACE_TAB_VALUES = {
@@ -83,8 +89,10 @@ const WORKSPACE_TAB_VALUES = {
   members: "members",
   billing: "billing",
   labels: "labels",
+  issue_statuses: "issue-statuses",
   properties: "properties",
   quick_actions: "quick-actions",
+  mcp: "mcp",
   plugins: "plugins",
 } as const;
 const WORKSPACE_TAB_ICONS = {
@@ -96,8 +104,10 @@ const WORKSPACE_TAB_ICONS = {
   members: Users,
   billing: CreditCard,
   labels: Tags,
+  issue_statuses: CircleDot,
   properties: SlidersHorizontal,
   quick_actions: Zap,
+  mcp: Server,
   plugins: Blocks,
 } as const;
 
@@ -254,7 +264,7 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
 
       {/* Right content */}
       <div className="min-w-0 flex-1 md:overflow-y-auto">
-        <div className={`mx-auto w-full p-4 sm:p-6 md:p-8 ${activeTab === "labels" || activeTab === "properties" || activeTab === "quick-actions"
+        <div className={`mx-auto w-full p-4 sm:p-6 md:p-8 ${activeTab === "labels" || activeTab === "issue-statuses" || activeTab === "properties" || activeTab === "quick-actions"
               ? "max-w-5xl"
               : "max-w-3xl"}`}>
           <TabsContent value="profile"><AccountTab /></TabsContent>
@@ -274,8 +284,10 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
             <TabsContent value="billing"><BillingTab /></TabsContent>
           ) : null}
           <TabsContent value="labels"><LabelsTab /></TabsContent>
+          <TabsContent value="issue-statuses"><IssueStatusesTab /></TabsContent>
           <TabsContent value="properties"><PropertiesTab /></TabsContent>
           <TabsContent value="quick-actions"><QuickActionsTab /></TabsContent>
+          <TabsContent value="mcp"><McpTab /></TabsContent>
           {pluginsEnabled ? <TabsContent value="plugins"><PluginsTab /></TabsContent> : null}
           {extraAccountTabs?.map((tab) => (
             <TabsContent key={tab.value} value={tab.value}>{tab.content}</TabsContent>

@@ -479,11 +479,15 @@ func (i *Importer) resolveRequirementExecutor(ctx context.Context, workspaceID, 
 	} else if err != nil {
 		return db.Agent{}, fmt.Errorf("load requirement executor owner membership: %w", err)
 	}
-	ready, reason, err := service.AgentReadiness(ctx, i.Queries, agent)
+	verdict, err := service.AgentReadiness(ctx, i.Queries, agent)
 	if err != nil {
 		return db.Agent{}, fmt.Errorf("check requirement executor readiness: %w", err)
 	}
-	if !ready {
+	if !verdict.Ready() {
+		reason := verdict.Detail
+		if reason == "" {
+			reason = string(verdict.Reason)
+		}
 		i.warn("external requirement sync: executor is not ready",
 			"provider", defaultRequirementProvider,
 			"workspace_id", util.UUIDToString(workspaceID),

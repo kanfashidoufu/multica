@@ -36,6 +36,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/storage"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/dbid"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 	htmltokenizer "golang.org/x/net/html"
 )
@@ -1045,6 +1046,7 @@ func (i *Importer) notifyAssignee(ctx context.Context, issue db.Issue, assigneeI
 		"reason":   "assignee",
 	})
 	item, err := i.Queries.CreateInboxItem(ctx, db.CreateInboxItemParams{
+		ID:            dbid.NewV7(),
 		WorkspaceID:   issue.WorkspaceID,
 		RecipientType: "member",
 		RecipientID:   assigneeID,
@@ -1165,9 +1167,10 @@ func (i *Importer) publishIssueMetadataChanged(issue db.Issue, source string) {
 		ActorType:   "system",
 		ActorID:     "",
 		Payload: map[string]any{
-			"issue_id": util.UUIDToString(issue.ID),
-			"metadata": externalIssueMetadataMap(issue.Metadata),
-			"source":   source,
+			"issue_id":       util.UUIDToString(issue.ID),
+			"metadata":       externalIssueMetadataMap(issue.Metadata),
+			"issue_revision": issue.Revision,
+			"source":         source,
 		},
 	})
 }
@@ -1189,6 +1192,7 @@ func externalIssueEventPayload(issue db.Issue) map[string]any {
 		"project_id":      util.UUIDToPtr(issue.ProjectID),
 		"position":        issue.Position,
 		"metadata":        externalIssueMetadataMap(issue.Metadata),
+		"revision":        issue.Revision,
 	}
 }
 
@@ -2244,7 +2248,7 @@ func (i *Importer) createAttachments(ctx context.Context, rec normalizedRecord, 
 			continue
 		}
 		ids = append(ids, att.ID)
-		rows = append(rows, att)
+		rows = append(rows, att.Attachment())
 	}
 	return ids, rows, errs
 }
@@ -2261,7 +2265,7 @@ func (i *Importer) deleteUnlinkedAttachments(ctx context.Context, workspaceID pg
 		if !id.Valid {
 			continue
 		}
-		if err := i.Queries.DeleteAttachment(ctx, db.DeleteAttachmentParams{
+		if _, err := i.Queries.DeleteAttachment(ctx, db.DeleteAttachmentParams{
 			ID:          id,
 			WorkspaceID: workspaceID,
 		}); err != nil && i.Logger != nil {
