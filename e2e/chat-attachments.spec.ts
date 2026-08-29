@@ -114,8 +114,10 @@ test.describe("Chat attachments", () => {
     createdAgentId = agentIns.rows[0].id as string;
 
     const sessionIns = await pgc.query(
-      `INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, status)
-       VALUES ($1, $2, $3, 'E2E Chat Attachment Session', 'active')
+      `INSERT INTO chat_session (
+         workspace_id, agent_id, creator_id, title, status, explicitly_created_at
+       )
+       VALUES ($1, $2, $3, 'E2E Chat Attachment Session', 'active', now())
        RETURNING id`,
       [ws.id, createdAgentId, userId],
     );
@@ -134,7 +136,7 @@ test.describe("Chat attachments", () => {
       body: form,
       headers: { "X-Workspace-Slug": ws.slug },
     });
-    expect(uploadRes.status).toBe(200);
+    expect(uploadRes.status, await uploadRes.clone().text()).toBe(200);
     const uploaded = (await uploadRes.json()) as UploadRow;
     expect(uploaded.chat_session_id).toBe(createdSessionId);
     expect(uploaded.chat_message_id).toBeNull();

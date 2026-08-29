@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/storage"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -166,7 +167,7 @@ func (h *Handler) attachmentToResponse(ctx context.Context, a db.Attachment, mod
 		UploaderID:   uuidToString(a.UploaderID),
 		Filename:     a.Filename,
 		URL:          a.Url,
-		DownloadURL:  attachmentDownloadPath(id),
+		DownloadURL:  util.AttachmentDownloadPath(id),
 		MarkdownURL:  h.buildMarkdownURL(a, id),
 		ContentType:  a.ContentType,
 		SizeBytes:    a.SizeBytes,
@@ -196,12 +197,8 @@ func (h *Handler) attachmentToResponse(ctx context.Context, a db.Attachment, mod
 	return resp
 }
 
-func attachmentDownloadPath(id string) string {
-	return "/api/attachments/" + id + "/download"
-}
-
 func (h *Handler) attachmentResponseDownloadURL(ctx context.Context, id, rawURL string) string {
-	endpoint := attachmentDownloadPath(id)
+	endpoint := util.AttachmentDownloadPath(id)
 	switch h.resolveAttachmentDownloadMode(rawURL) {
 	case attachmentDownloadModeCloudFront:
 		if h.CFSigner == nil {
@@ -264,7 +261,7 @@ func (h *Handler) attachmentResponseDownloadURL(ctx context.Context, id, rawURL 
 //     already broken before MUL-3192 and stay broken here, but we
 //     don't make them worse.
 func (h *Handler) buildMarkdownURL(a db.Attachment, id string) string {
-	relPath := attachmentDownloadPath(id)
+	relPath := util.AttachmentDownloadPath(id)
 	publicURL := strings.TrimRight(h.cfg.PublicURL, "/")
 
 	if h.storageURLIsPubliclyReadable(a.Url) {
@@ -1458,6 +1455,12 @@ func (h *Handler) DeleteAttachment(w http.ResponseWriter, r *http.Request) {
 		WorkspaceID: wsUUID,
 	})
 	if err != nil {
+		writeError(w, http.StatusNotFound, "attachment not found")
+		return
+	}
+	// Captured-context attachments are immutable historical copies. They are
+	// deleted only with their target issue, workspace, or abandoned context.
+	if att.SourceContextID.Valid {
 		writeError(w, http.StatusNotFound, "attachment not found")
 		return
 	}
