@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -479,7 +480,11 @@ func (i *Importer) resolveRequirementExecutor(ctx context.Context, workspaceID, 
 	} else if err != nil {
 		return db.Agent{}, fmt.Errorf("load requirement executor owner membership: %w", err)
 	}
-	verdict, err := service.AgentReadiness(ctx, i.Queries, agent)
+	verdict, err := service.AgentReadiness(ctx, service.RuntimeLookup{
+		Queries: i.Queries,
+		Metrics: i.IssueService.Metrics,
+		Source:  obsmetrics.RuntimeLookupSourceIssue,
+	}, agent)
 	if err != nil {
 		return db.Agent{}, fmt.Errorf("check requirement executor readiness: %w", err)
 	}
