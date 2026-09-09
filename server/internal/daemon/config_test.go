@@ -109,7 +109,7 @@ func TestPatternsFromEnv_DefaultsWhenUnset(t *testing.T) {
 // A localhost server URL is not the official cloud host, so this exercises the
 // self-host branch of defaultGCCompletedTaskTTL: retention stays unbounded until
 // an operator opts in, and a daemon upgrade never starts deleting on its own.
-func TestLoadConfig_CompletedTaskTTLDefaultsDisabledOnSelfHostAndReadsEnv(t *testing.T) {
+func TestLoadConfig_CompletedTaskTTLDefaultsToSevenDaysOnSelfHostAndReadsEnv(t *testing.T) {
 	stageFakeAgent(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("SHELL", filepath.Join(t.TempDir(), "missing-shell"))
@@ -123,8 +123,17 @@ func TestLoadConfig_CompletedTaskTTLDefaultsDisabledOnSelfHostAndReadsEnv(t *tes
 	if err != nil {
 		t.Fatalf("LoadConfig with default completed-task TTL: %v", err)
 	}
+	if cfg.GCCompletedTaskTTL != 7*24*time.Hour {
+		t.Fatalf("GCCompletedTaskTTL = %s, want 7d on self-host", cfg.GCCompletedTaskTTL)
+	}
+
+	t.Setenv("MULTICA_GC_COMPLETED_TASK_TTL", "0")
+	cfg, err = LoadConfig(overrides)
+	if err != nil {
+		t.Fatalf("LoadConfig with self-host opt-out: %v", err)
+	}
 	if cfg.GCCompletedTaskTTL != 0 {
-		t.Fatalf("GCCompletedTaskTTL = %s, want disabled", cfg.GCCompletedTaskTTL)
+		t.Fatalf("GCCompletedTaskTTL = %s, want an explicit 0 to disable the self-host default", cfg.GCCompletedTaskTTL)
 	}
 
 	t.Setenv("MULTICA_GC_COMPLETED_TASK_TTL", "36h")
@@ -221,7 +230,7 @@ func TestLoadConfig_CompletedTaskTTLDefaultsBoundedOnOfficialCloud(t *testing.T)
 	}
 }
 
-func TestDefaultGCCompletedTaskTTLOnlyBoundsOfficialCloudHost(t *testing.T) {
+func TestDefaultGCCompletedTaskTTLByServerHost(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name      string

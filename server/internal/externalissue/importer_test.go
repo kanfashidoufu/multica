@@ -20,6 +20,7 @@ import (
 	enterpriseLark "github.com/multica-ai/multica/server/internal/enterprise/lark"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/service"
+	dbfx "github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -604,6 +605,124 @@ func TestImportBugSyncFallsBackToWorkspaceOwner(t *testing.T) {
 	}
 }
 
+func TestImportBugSyncRoutesToUniqueOwnedAgentAndKeepsHumanReviewer(t *testing.T) {
+	ctx := context.Background()
+	pool := openTestPool(t, ctx)
+	q := db.New(pool)
+	fx := createImporterFixture(t, ctx, pool, q)
+	reviewer := createImporterWorkspaceMember(t, ctx, pool, q, fx.Workspace.ID, "王宁", "")
+	developerAgent := createImporterOwnedAgent(t, ctx, pool, q, fx.Workspace.ID, reviewer.User.ID, "王宁的开发智能体")
+
+	bus := events.New()
+	taskSvc := service.NewTaskService(q, pool, nil, bus)
+	importer := &Importer{
+		Queries: q,
+		IssueService: service.NewIssueService(
+			q,
+			pool,
+			bus,
+			analytics.NoopClient{},
+			taskSvc,
+		),
+		Bus: bus,
+		Config: Config{
+			WebhookToken:   "test-token",
+			BugWorkspaceID: util.UUIDToString(fx.Workspace.ID),
+		},
+	}
+
+	res, err := importer.ImportBugSync(ctx, BugSyncRequest{
+		Payload: BugSyncPayload{
+			Source:    "syndra",
+			SourceEnv: "local",
+			Items: []BugSyncItem{{
+				Event:       "upsert",
+				EntityType:  "version_bug",
+				ExternalKey: "syndra:local:version_bug:auto-agent",
+				BugID:       1082,
+				VersionID:   163,
+				VersionName: "v2.91.56-企业一体化项目看板",
+				Title:       "自动交给处理人的智能体",
+				BugLevel:    "P2",
+				Status:      "active",
+				Assignee:    BugSyncPerson{MateID: int64Ptr(2401), Name: strPtr("王宁")},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ImportBugSync: %v", err)
+	}
+	if len(res.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(res.Items))
+	}
+	issue := res.Items[0].Issue
+	if issue.AssigneeType.String != "agent" || issue.AssigneeID != developerAgent.ID {
+		t.Fatalf("assignee = (%q, %s), want agent %s", issue.AssigneeType.String, util.UUIDToString(issue.AssigneeID), util.UUIDToString(developerAgent.ID))
+	}
+	if issue.CreatorType != "member" || issue.CreatorID != reviewer.User.ID {
+		t.Fatalf("creator = (%q, %s), want reviewer member %s", issue.CreatorType, util.UUIDToString(issue.CreatorID), util.UUIDToString(reviewer.User.ID))
+	}
+
+	var metadata map[string]any
+	if err := json.Unmarshal(issue.Metadata, &metadata); err != nil {
+		t.Fatalf("metadata decode: %v", err)
+	}
+	if metadata["external_source"] != "syndra" ||
+		metadata["bug_version_name"] != "v2.91.56-企业一体化项目看板" {
+		t.Fatalf("syndra metadata = %#v", metadata)
+	}
+	for _, key := range []string{
+		"bug_reviewer_user_id",
+		"bug_reviewer_name",
+		"bug_agent_routing",
+		"bug_developer_agent_id",
+		"bug_developer_agent_name",
+	} {
+		if _, ok := metadata[key]; ok {
+			t.Errorf("routing should not extend the Syndra metadata contract with %q", key)
+		}
+	}
+
+	tasks, err := q.ListTasksByIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("ListTasksByIssue: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].AgentID != developerAgent.ID || tasks[0].Status != "queued" {
+		t.Fatalf("tasks = %#v, want one queued task for %s", tasks, util.UUIDToString(developerAgent.ID))
+	}
+	assertAssigneeSubscribedAndInbox(t, ctx, q, pool, issue.ID, reviewer.User.ID)
+}
+
+func TestResolveBugDeveloperAssignmentRequiresExactlyOneRunnableOwnedAgent(t *testing.T) {
+	reviewerID := pgtype.UUID{Bytes: [16]byte{1}, Valid: true}
+	otherOwnerID := pgtype.UUID{Bytes: [16]byte{2}, Valid: true}
+	runtimeID := pgtype.UUID{Bytes: [16]byte{3}, Valid: true}
+	firstAgentID := pgtype.UUID{Bytes: [16]byte{4}, Valid: true}
+	secondAgentID := pgtype.UUID{Bytes: [16]byte{5}, Valid: true}
+
+	one := resolveBugDeveloperAssignment(reviewerID, []db.Agent{
+		{ID: firstAgentID, OwnerID: reviewerID, RuntimeID: runtimeID, Name: "Developer"},
+		{ID: secondAgentID, OwnerID: otherOwnerID, RuntimeID: runtimeID, Name: "Someone else's"},
+		{ID: secondAgentID, OwnerID: reviewerID, Name: "No runtime"},
+	})
+	if one.CandidateCount != 1 || one.DeveloperAgentID != firstAgentID {
+		t.Fatalf("unique assignment = %#v", one)
+	}
+
+	ambiguous := resolveBugDeveloperAssignment(reviewerID, []db.Agent{
+		{ID: firstAgentID, OwnerID: reviewerID, RuntimeID: runtimeID, Name: "First"},
+		{ID: secondAgentID, OwnerID: reviewerID, RuntimeID: runtimeID, Name: "Second"},
+	})
+	if ambiguous.CandidateCount != 2 || ambiguous.DeveloperAgentID.Valid {
+		t.Fatalf("ambiguous assignment = %#v", ambiguous)
+	}
+
+	if !bugStatusStartsDevelopment("todo") || !bugStatusStartsDevelopment("in_progress") ||
+		bugStatusStartsDevelopment("done") {
+		t.Fatal("bug development status gate drifted")
+	}
+}
+
 func TestImportFetchesLarkRecordWhenAutomationSendsOnlyRecordIDs(t *testing.T) {
 	ctx := context.Background()
 	pool := openTestPool(t, ctx)
@@ -1134,4 +1253,23 @@ func createImporterWorkspaceMember(t *testing.T, ctx context.Context, pool *pgxp
 		Member:         member,
 		ExternalUserID: externalUserID,
 	}
+}
+
+func createImporterOwnedAgent(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *db.Queries, workspaceID, ownerID pgtype.UUID, name string) db.Agent {
+	t.Helper()
+	fixture := dbfx.New(pool, util.UUIDToString(workspaceID), util.UUIDToString(ownerID))
+	runtimeID := fixture.Runtime(t, "External import test runtime", dbfx.Cols{
+		"runtime_mode": "local", "provider": "codex", "device_info": "{}",
+		"daemon_id": fmt.Sprintf("external-import-daemon-%d", time.Now().UnixNano()),
+	})
+	agentID := fixture.Agent(t, name, runtimeID, dbfx.Cols{"runtime_mode": "local"})
+	id, err := util.ParseUUID(agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := q.GetAgent(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return agent
 }
