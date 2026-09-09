@@ -42,10 +42,10 @@ Multica 当前支持 `syndra.multica.version_bug.webhook.v1` 结构，按 `items
 | `items[].bug_id` | Bug 平台 ID |
 | `items[].title` | 原始 Bug 标题；Multica issue 标题会自动加上 `【Bug#<bug_id>】【<version_name>】` 前缀 |
 | `items[].description` | Multica issue 描述，支持将简单 HTML `<p>/<br>` 转为文本，并将 `http/https` 的 `<img src="...">` 转为 Markdown 图片 |
-| `items[].status/status_name` | 映射为 Multica issue 状态 |
+| `items[].status/status_name` | 普通任务映射为 Multica issue 状态；已进入自动化的任务保留本地交付状态，源状态继续写入 metadata |
 | `items[].bug_level/priority` | 映射为 Multica issue 优先级 |
 | `items[].bug_type_id/bug_type` | 写入 issue metadata |
-| `items[].creator/owner/assignee/solver` | 写入 issue metadata；创建 issue 时使用 `assignee.name` 精确匹配 Bug 工作区中的唯一 Multica 用户，并把该用户作为 assignee 和 creator；也兼容 `bug_detail.assignee.name`。负责人名称缺失、匹配不到或不唯一时，统一回退到 Bug 工作区的 owner（工作区创建人）；不使用 `mate_id`，也不读取默认指派人环境变量 |
+| `items[].creator/owner/assignee/solver` | 写入 issue metadata；创建 issue 时使用 `assignee.name` 精确匹配 Bug 工作区中的唯一 Multica 用户，并把该用户作为 assignee 和 creator；也兼容 `bug_detail.assignee.name`。负责人名称缺失、匹配不到或不唯一时，统一回退到 Bug 工作区的 owner（工作区创建人）；不使用 `mate_id`，也不读取默认指派人环境变量。试运行期间，仅当推送负责人被精确解析为王宁时，才继续尝试转交给其唯一可执行的个人智能体 |
 | `items[].module` | 写入 issue metadata |
 | `items[].resolve_solution/resolve_solution_name` | 写入 issue metadata |
 | `items[].attachments/videos` | 当前记录数量到 metadata，暂不下载并绑定 Multica attachment |
@@ -72,6 +72,42 @@ Multica 当前支持 `syndra.multica.version_bug.webhook.v1` 结构，按 `items
 | `P2` | `high` |
 | `P3` | `medium` |
 | `P4` / `P5` | `low` |
+
+## Bug 自动化试运行
+
+试运行只处理 **Syndra 明确指派给王宁** 的新 Bug，接入点保持在 Syndra importer：
+
+1. `assignee.name`（兼容 `bug_detail.assignee.name`）必须精确匹配 Bug 工作区中唯一的王宁成员。名称缺失、不匹配或重名时仍回退到工作区 owner，但不会进入自动化。
+2. 该成员必须恰好拥有一个未归档、已绑定运行时的智能体；零个或多个候选都保留成员指派。
+3. 仅 `todo` / `in_progress` 的新任务可自动派发。其他成员、其他来源和已有任务不会因此新建运行。
+4. 先创建成员任务并写完 Syndra 证据和自动化验收要求，再改派智能体，复用 `EnqueueTaskForIssueByActor` 创建运行。成员仍是创建人、订阅人及运行责任人。入队失败会尝试恢复成员指派并记录错误。
+
+进入试运行时会由 importer 写入内部布尔标记 `multica_bug_automation=true`；
+该字段不接受 Syndra payload 设置。新建时 metadata 已满则保留成员处理；已接入任务的后续同步若无法保留内部标记，会返回错误并保留现状，不越过字段上限。
+描述追加验收要求：明确版本分支、取得验证和 CI 结果、实际合入版本分支并核实远端提交。
+这使当前运行时可以按任务的验收要求取得 CI 结果，而不会把“已开 PR，CI 运行中”当成交付。
+
+后续 upsert 仍更新源描述、优先级和 Syndra metadata，但已进入试运行的任务保留
+Multica 当前状态和内部标记，避免源系统的 `resolved` 把未合入版本的任务改成 `done`。
+普通任务保持原有 status/metadata 镜像语义。两类任务都保留 Multica 当前负责人，
+不会因为重复同步重复启动。源版本或负责人变化后，智能体在下一轮和合并前重新核对，
+不沿用失效分支决定。
+
+分支与交付流程由内置 `multica-fixing-syndra-bugs` skill 和两个校验脚本承接：
+
+- 以“Bug、版本、仓库、远端分支”为一组确认信息。当前创建人的有效回复，或明确关联该版本和仓库的项目映射，可以复用；普通项目 `ref`、默认分支提示和环境分支不能作为依据。
+- 模糊匹配只列候选。即使只有一个候选，没有确定证据也必须请王宁确认。多候选、缺失版本、信息冲突、远端不可访问或分支不存在均进入 `blocked`。
+- 读取最新远端分支，完整区分 `2.91.56`、`2.91.560`、`2.91.56.1`；不按 `_wn`、`_merge` 后缀猜测发布目标。
+- 复用托管 checkout 或 `local_directory.execution_mode=worktree`。每个受影响仓库使用独立修复分支和 PR，恢复运行时先读取已有讨论、分支和 PR，保护前轮工作。
+- 验证通过后按仓库规则合并。GitHub 使用已验证 head 约束合并请求；进入队列或启用自动合并不算完成。脚本核对真实 merged 状态、PR base/head，并确认最新远端版本分支包含合并提交。其他 forge 必须取得同等证据。
+- 所有受影响仓库都完成合入后，才交给创建人 review，任务进入 `in_review`。PR 使用标题关联任务，不设置可能提前自动关闭任务的 `Fixes/Closes/Resolves`；`done` 由人工验收。
+
+`waiting_on` / `blocked_reason` 仅作临时检索游标，后续同步可能覆盖它们。
+分支决定保存在评论中，恢复时读取历史证据，不因游标丢失重复询问，也不据此猜测授权。
+CI 或合并队列尚未完成时明确保留阻塞并给出恢复动作；当前流程不创建额外定时任务，
+也不假设任务退出后会自动被 CI 完成事件唤醒。
+
+实现边界与验证说明见 [Bug 自动化实现说明](bug-automation.md)。
 
 ## 示例
 

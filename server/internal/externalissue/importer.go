@@ -642,6 +642,8 @@ func (i *Importer) ImportBugSync(ctx context.Context, req BugSyncRequest) (BugSy
 		return BugSyncResult{}, fmt.Errorf("%w: invalid workspace UUID", ErrBugWorkspaceNotConfigured)
 	}
 
+	workspaceAgents := i.listBugDeveloperAgents(ctx, req.Payload, workspaceID)
+
 	provider := bugProvider(req.Payload)
 	i.info("external bug sync: batch started",
 		"provider", provider,
@@ -697,7 +699,16 @@ func (i *Importer) ImportBugSync(ctx context.Context, req BugSyncRequest) (BugSy
 			"assignee_name", bugPersonName(bugAssigneePerson(item)),
 			"used_workspace_owner_fallback", fallbackReason != "",
 		)
-		itemResult, err := i.importBugSyncItem(ctx, req.Payload, item, workspaceID, assignee.UserID)
+		assignment := i.resolveBugDeveloperAssignmentForItem(
+			workspaceID,
+			provider,
+			recordID,
+			item,
+			assignee.UserID,
+			fallbackReason,
+			workspaceAgents,
+		)
+		itemResult, err := i.importBugSyncItem(ctx, req.Payload, item, workspaceID, assignment)
 		if err != nil {
 			i.warn("external bug sync: item import failed",
 				"provider", provider,
@@ -720,7 +731,7 @@ func (i *Importer) ImportBugSync(ctx context.Context, req BugSyncRequest) (BugSy
 	return result, nil
 }
 
-func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload, item BugSyncItem, workspaceID pgtype.UUID, assigneeID pgtype.UUID) (BugSyncItemResult, error) {
+func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload, item BugSyncItem, workspaceID pgtype.UUID, assignment bugDeveloperAssignment) (BugSyncItemResult, error) {
 	provider := bugProvider(payload)
 	recordID := bugRecordID(item)
 	if recordID == "" {
@@ -770,6 +781,7 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 	status := bugIssueStatus(item)
 	priority := bugIssuePriority(item)
 	metadata := bugIssueMetadata(payload, item, provider, recordID)
+	delete(metadata, bugAutomationMetadataKey)
 	i.info("external bug sync: item normalized",
 		"provider", provider,
 		"workspace_id", util.UUIDToString(workspaceID),
@@ -813,15 +825,7 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 			"issue_id", util.UUIDToString(existing.ID),
 			"issue_number", existing.Number,
 		)
-		updated, err := i.Queries.UpdateIssueFromExternalSync(ctx, db.UpdateIssueFromExternalSyncParams{
-			Title:       title,
-			Description: util.StrToText(description),
-			Status:      status,
-			Priority:    priority,
-			Metadata:    metadataBytes,
-			ID:          existing.ID,
-			WorkspaceID: existing.WorkspaceID,
-		})
+		existing, updated, err := i.updateBugSyncMirror(ctx, existing, title, description, status, priority, metadata)
 		if err != nil {
 			i.warn("external bug sync: existing issue update failed",
 				"provider", provider,
@@ -870,8 +874,17 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 		return BugSyncItemResult{}, fmt.Errorf("lookup existing bug issue by origin: %w", err)
 	}
 
+	if assignment.DeveloperAgentID.Valid && bugStatusStartsDevelopment(status) && i.IssueService.TaskService != nil && len(metadata) < maxBugMetadataKeys {
+		metadata[bugAutomationMetadataKey] = true
+		description += bugAutomationAcceptance
+		metadataBytes, err = json.Marshal(metadata)
+		if err != nil {
+			return BugSyncItemResult{}, err
+		}
+	}
+
 	createOpts := service.IssueCreateOpts{
-		ActorID:  util.UUIDToString(assigneeID),
+		ActorID:  util.UUIDToString(assignment.ReviewerID),
 		Platform: "external_import:" + provider,
 	}
 	if i.BroadcastPayload != nil {
@@ -886,9 +899,9 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 		Status:         status,
 		Priority:       priority,
 		AssigneeType:   pgtype.Text{String: "member", Valid: true},
-		AssigneeID:     assigneeID,
+		AssigneeID:     assignment.ReviewerID,
 		CreatorType:    "member",
-		CreatorID:      assigneeID,
+		CreatorID:      assignment.ReviewerID,
 		OriginType:     pgtype.Text{String: OriginType, Valid: true},
 		OriginID:       originID,
 		AllowDuplicate: true,
@@ -909,15 +922,7 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 				"issue_id", util.UUIDToString(existing.ID),
 				"issue_number", existing.Number,
 			)
-			updated, updateErr := i.Queries.UpdateIssueFromExternalSync(ctx, db.UpdateIssueFromExternalSyncParams{
-				Title:       title,
-				Description: util.StrToText(description),
-				Status:      status,
-				Priority:    priority,
-				Metadata:    metadataBytes,
-				ID:          existing.ID,
-				WorkspaceID: existing.WorkspaceID,
-			})
+			existing, updated, updateErr := i.updateBugSyncMirror(ctx, existing, title, bugIssueDescription(item), status, priority, metadata)
 			if updateErr != nil {
 				i.warn("external bug sync: raced issue update failed",
 					"provider", provider,
@@ -974,6 +979,8 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 		"issue_number", res.Issue.Number,
 		"status", status,
 		"priority", priority,
+		"assignee_type", "member",
+		"assignee_id", util.UUIDToString(assignment.ReviewerID),
 	)
 
 	updated, err := i.Queries.UpdateIssueFromExternalSync(ctx, db.UpdateIssueFromExternalSyncParams{
@@ -1010,7 +1017,9 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 		"metadata_key_count", len(metadata),
 	)
 	i.publishIssueMetadataChanged(updated, "external_bug_sync")
-	i.notifyAssignee(ctx, updated, assigneeID)
+
+	updated = i.routeNewBugToDeveloperAgentIfEligible(ctx, updated, assignment, status)
+	i.notifyAssignee(ctx, updated, assignment.ReviewerID)
 	return BugSyncItemResult{
 		Issue:          updated,
 		Provider:       provider,
@@ -1138,7 +1147,7 @@ func (i *Importer) publishExternalIssueUpdated(ctx context.Context, prev db.Issu
 		ActorID:     "",
 		Payload: map[string]any{
 			"issue":               issuePayload,
-			"assignee_changed":    false,
+			"assignee_changed":    prev.AssigneeType != updated.AssigneeType || prev.AssigneeID != updated.AssigneeID,
 			"status_changed":      prev.Status != updated.Status,
 			"priority_changed":    prev.Priority != updated.Priority,
 			"project_changed":     false,
