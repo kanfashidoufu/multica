@@ -86,6 +86,7 @@ type Config struct {
 	WebhookToken                  string
 	DefaultWorkspaceID            string
 	BugWorkspaceID                string
+	BugAutomationAssignees        string
 	RequirementWorkspaceID        string
 	DefaultAssigneeExternalUserID string
 	LarkAppID                     string
@@ -101,6 +102,7 @@ func (c Config) withDefaults() Config {
 	c.WebhookToken = strings.TrimSpace(c.WebhookToken)
 	c.DefaultWorkspaceID = strings.TrimSpace(c.DefaultWorkspaceID)
 	c.BugWorkspaceID = strings.TrimSpace(c.BugWorkspaceID)
+	c.BugAutomationAssignees = strings.TrimSpace(c.BugAutomationAssignees)
 	c.RequirementWorkspaceID = strings.TrimSpace(c.RequirementWorkspaceID)
 	c.DefaultAssigneeExternalUserID = strings.TrimSpace(c.DefaultAssigneeExternalUserID)
 	c.LarkAppID = strings.TrimSpace(c.LarkAppID)

@@ -38,6 +38,7 @@ func (h *Handler) ImportExternalIssue(w http.ResponseWriter, r *http.Request) {
 		Config: externalissue.Config{
 			WebhookToken:           os.Getenv("MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN"),
 			BugWorkspaceID:         os.Getenv("MULTICA_EXTERNAL_BUG_WORKSPACE_ID"),
+			BugAutomationAssignees: os.Getenv("MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES"),
 			RequirementWorkspaceID: os.Getenv("MULTICA_EXTERNAL_REQUIREMENT_WORKSPACE_ID"),
 		},
 	}

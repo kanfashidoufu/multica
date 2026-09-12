@@ -19,12 +19,13 @@ sibling `multica-platform` skill's `references/` directory.
 ## 1. Recover scope and prior work
 
 Read the current issue and its relevant comment threads using the runtime's
-commands. Confirm `external_source=syndra`, `multica_bug_automation=true`,
-`bug_assignee_name=王宁`, and `creator_type=member`. Resolve `creator_id` against
-`member.user_id` from `multica workspace member list --output json`; require that
-this is the uniquely named 王宁 member, not a membership row ID. Other members'
-bugs are outside the pilot, even when their agent has this built-in skill.
-If assignment changed away from 王宁, stop automation and explain the handoff.
+commands. Confirm `external_source=syndra`, `multica_bug_automation=true`, and
+`creator_type=member`. The importer controls the pilot assignee allowlist via
+`MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES`; do not infer eligibility from this
+skill or hardcode a person's name. Resolve `creator_id` against `member.user_id`
+from `multica workspace member list --output json`, not a membership row ID. If
+the automation marker is absent or assignment changed away from the configured
+pilot member, stop automation and explain the handoff.
 
 Use the actual `bug_id`, `bug_version_id`, `bug_version_name`, environment,
 reproduction steps and source evidence. An environment branch (`dev`, `test`,
@@ -128,7 +129,7 @@ fetches, shallow history or a missing merge commit are unverified, not success.
 
 After every affected repo has proof, post one result in the appropriate comment
 thread with `--content-file` and the runtime-provided `--parent` when applicable.
-Mention the verified creator as `[@王宁](mention://member/<creator_id>)`. Include:
+Mention the verified creator as `[@Name](mention://member/<creator_id>)`. Include:
 
 - bug root cause and minimal change;
 - each repository, confirmed version branch and decision evidence;
