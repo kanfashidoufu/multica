@@ -1,16 +1,16 @@
 ---
 name: multica-fixing-syndra-bugs
-description: "Use for code-changing Syndra bugs enrolled in the 王宁 pilot (external_source=syndra, multica_bug_automation=true), including version-branch confirmation, resumed fixes and verifying integration before review."
+description: "Use for code-changing Syndra bugs enrolled in the 王宁 pilot (external_source=syndra, multica_bug_automation=true), including version-branch confirmation, resumed fixes, validation-gated version/test integration and review handoff."
 user-invocable: false
 allowed-tools: Bash(multica *), Bash(git *), Bash(gh *), Bash(bash *)
 ---
 
-# Deliver Syndra bug fixes to their version branches
+# Deliver Syndra bug fixes to version and test branches
 
-The issue's automation acceptance criteria include validation, CI results and
-actual integration into the version branch. Creating a PR or enabling auto-merge
-is incomplete. Keep the original member creator as the branch decision and
-review contact. Respect the runtime's Agent Identity limits.
+The acceptance criteria are validation, CI, merge into the confirmed version
+branch, promotion to remote `test`, and review notification. A PR or auto-merge
+setting alone is incomplete. Keep the original member creator as branch
+decision and review contact; respect Agent Identity limits.
 
 Read `multica-platform/references/issues.md`, `projects.md`, and `mentions.md`
 when using their status, checkout, PR and reply contracts. These live under the
@@ -95,15 +95,20 @@ unexpected remote head before proceeding. Never force-push a version branch.
 Read [references/version-delivery.md](references/version-delivery.md). Open or
 update each PR with its confirmed version branch as base. Include the issue key
 in the title to link it in Multica, but omit `Fixes/Closes/Resolves <issue-key>`:
-those keywords can let one PR close the whole issue before all delivery proofs
-or human acceptance. This pilot hands off to `in_review` after integration;
-`done` stays with the human, consistent with the current runtime brief.
+those keywords can let one PR close the issue before delivery proofs; `done`
+stays with human acceptance.
 
-Continue through validation and merge under existing repository rules without
-a separate routine merge approval. Required reviews/checks and uncertain
-conflicts remain blockers. A green run, task completion, PR creation, pending
-CI, merge-queue admission, or a test-environment deployment does not meet the
-issue's delivery criteria.
+After local validation and required CI pass, merge the validated fix into the
+confirmed version branch, push it, then merge that version branch into remote
+`test` and push it. Resolve conflicts semantically in the isolated integration
+checkout; after a successful resolution notify the current human assignee.
+Required reviews/checks and uncertain conflicts remain technical blockers.
+
+If validation or required CI fails, commit the current fix snapshot, merge that
+snapshot into the confirmed version branch and push it, then set the issue to
+`blocked --no-start`. Do not promote the version branch to `test`. Comment with
+the failed checks, version branch commit and the exact action needed from the
+current human assignee; preserve the task branch and checkout for continuation.
 
 For GitHub, run the bundled verifier after the provider reports a completed
 merge, using the recorded validated PR head:
@@ -113,9 +118,9 @@ bash <this-skill-dir>/scripts/verify-version-delivery.sh \
   <checkout-path> <confirmed-version-branch> <canonical-pr-url> <validated-head-sha>
 ```
 
-Only `delivery=merged` with exit status 0 proves this repository's delivery. It
-checks the PR's base/head/merged state and fetches the remote target to verify
-that it contains the merge commit. Squash/rebase merges must use the resulting
+Only `delivery=merged` with exit status 0 proves the version branch delivery.
+Then run the test-branch verification described in the reference. Both remote
+facts are required before review. Squash/rebase merges must use the resulting
 merge commit, not assume the original PR head remains an ancestor. Failed
 fetches, shallow history or a missing merge commit are unverified, not success.
 
@@ -127,13 +132,15 @@ Mention the verified creator as `[@王宁](mention://member/<creator_id>)`. Incl
 
 - bug root cause and minimal change;
 - each repository, confirmed version branch and decision evidence;
-- PR URL, validated head, merge commit and fetched version tip;
+- PR URL, validated head, version merge commit and fetched version tip;
+- test merge commit and fetched test tip;
 - tests and CI results, remaining risks and optional verification steps.
 
-Set `in_review` only now, using `--no-start` when changing status for work already
-in progress. Ask the creator to verify the merged result; do not claim a
+Set `in_review` only after both remote integrations are proven, using
+`--no-start` when changing status for work already in progress. Notify the
+current human assignee and ask them to review the merged result; do not claim a
 production deployment occurred. Use the target repository's own setup commands
-if offering a detached review worktree at the merge commit.
+if offering a detached review worktree at the test merge commit.
 
 If blocked, keep the issue `blocked`, clearly state that version integration is
 incomplete, and identify the exact missing decision/check/access or conflicting

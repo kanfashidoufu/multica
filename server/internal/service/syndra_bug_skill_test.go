@@ -147,6 +147,24 @@ func TestVerifyVersionDeliveryRequiresMergedValidatedHeadInRemoteTarget(t *testi
 	}
 }
 
+func TestVerifyTestPromotionRequiresVersionTipInRemoteTest(t *testing.T) {
+	script := syndraSkillScript(t, "verify-test-promotion.sh")
+	repo, _, _ := syndraTestRepo(t)
+	syndraGit(t, "-C", repo, "commit", "--allow-empty", "-m", "version merge")
+	version := syndraGit(t, "-C", repo, "rev-parse", "HEAD")
+	syndraGit(t, "-C", repo, "push", "origin", "HEAD:refs/heads/release/v2.91.56")
+	syndraGit(t, "-C", repo, "push", "origin", "HEAD:refs/heads/test")
+	good := exec.Command("bash", script, repo, "test", version)
+	if out, err := good.CombinedOutput(); err != nil || !strings.Contains(string(out), "promotion=merged\n") {
+		t.Fatalf("test promotion should pass: %s, %v", out, err)
+	}
+	notPromoted := syndraGit(t, "-C", repo, "commit", "--allow-empty", "-m", "unpromoted")
+	bad := exec.Command("bash", script, repo, "test", notPromoted)
+	if out, err := bad.CombinedOutput(); err == nil || strings.Contains(string(out), "promotion=merged\n") {
+		t.Fatalf("unpromoted version tip should fail: %s, %v", out, err)
+	}
+}
+
 func TestSyndraSkillResourcesAreReachable(t *testing.T) {
 	skill, ok := findSkill(t, "multica-fixing-syndra-bugs")
 	if !ok {
@@ -162,6 +180,31 @@ func TestSyndraSkillResourcesAreReachable(t *testing.T) {
 	for _, f := range skill.Files {
 		if !strings.Contains(reachable, f.Path) {
 			t.Errorf("entrypoint does not link supporting file %s", f.Path)
+		}
+	}
+}
+
+func TestSyndraSkillRequiresVersionThenTestPromotionAndFailureHandoff(t *testing.T) {
+	skill, ok := findSkill(t, "multica-fixing-syndra-bugs")
+	if !ok {
+		t.Fatal("Syndra skill missing")
+	}
+	refs := map[string]string{}
+	for _, f := range skill.Files {
+		refs[f.Path] = f.Content
+	}
+	delivery := refs["references/version-delivery.md"]
+	for _, want := range []string{
+		"validated task/PR -> confirmed version branch -> test",
+		"git push origin HEAD:refs/heads/test",
+		"current human assignee",
+		"## Validation failure path",
+		"Push the version branch. Do not merge it into `test`",
+		"blocked --no-start",
+		"not a successful delivery",
+	} {
+		if !strings.Contains(delivery, want) {
+			t.Errorf("version-delivery reference missing %q", want)
 		}
 	}
 }

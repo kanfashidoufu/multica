@@ -23,7 +23,7 @@ const bugAutomationPilotAssignee = "王宁"
 
 const bugAutomationMetadataKey = "multica_bug_automation"
 
-const bugAutomationAcceptance = "\n\n自动化验收：使用 multica-fixing-syndra-bugs skill。先确认每个仓库对应的版本分支；无法确认时请王宁人工确认。修复后必须取得本地验证及 CI 结果，并将修复合入已确认的版本分支，核实远端分支包含合并提交后才可交付 review。仅创建 PR、进入合并队列或发布测试环境均不算完成。"
+const bugAutomationAcceptance = "\n\n自动化验收：使用 multica-fixing-syndra-bugs skill。先确认每个仓库对应的版本分支；无法确认时请王宁人工确认。验证通过后必须取得本地验证及 CI 结果，将修复合入已确认的版本分支并推送远端，再将该版本分支合入 test 并推送远端；冲突解决后通知当前人工指派人。验证失败时提交当前修复快照到版本分支并 block 任务，通知当前人工指派人介入。仅创建 PR、进入合并队列或发布测试环境均不算完成。"
 
 // Keep the pilot's delivery state local: an upstream 'resolved' event is not
 // proof that its fix reached the release branch. Other imports keep mirroring.
