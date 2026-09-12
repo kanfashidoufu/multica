@@ -23,6 +23,7 @@ Multica 侧需要配置：
 |---|---|
 | `MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN` | webhook 鉴权 token |
 | `MULTICA_EXTERNAL_BUG_WORKSPACE_ID` | Bug 固定创建到的 workspace UUID |
+| `MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES` | 试运行自动化允许的 Syndra Bug 指派人姓名，逗号分隔，按 `assignee.name` 精确匹配；未配置时默认为 `王宁` |
 
 Bug 工作区不接受请求 Query 或 body 覆盖。`workspace_id` 和 `assignee_user_id` 参数不参与同步逻辑。
 
@@ -75,9 +76,9 @@ Multica 当前支持 `syndra.multica.version_bug.webhook.v1` 结构，按 `items
 
 ## Bug 自动化试运行
 
-试运行只处理 **Syndra 明确指派给王宁** 的新 Bug，接入点保持在 Syndra importer：
+试运行只处理 **Syndra 明确指派给自动化允许名单** 的新 Bug，接入点保持在 Syndra importer。允许名单由 `MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES` 配置，使用逗号分隔的成员姓名；未配置时默认为 `王宁`：
 
-1. `assignee.name`（兼容 `bug_detail.assignee.name`）必须精确匹配 Bug 工作区中唯一的王宁成员。名称缺失、不匹配或重名时仍回退到工作区 owner，但不会进入自动化。
+1. `assignee.name`（兼容 `bug_detail.assignee.name`）必须精确匹配 Bug 工作区中唯一的允许名单成员。名称缺失、不匹配或重名时仍回退到工作区 owner，但不会进入自动化。
 2. 该成员必须恰好拥有一个未归档、已绑定运行时的智能体；零个或多个候选都保留成员指派。
 3. 仅 `todo` / `in_progress` 的新任务可自动派发。其他成员、其他来源和已有任务不会因此新建运行。
 4. 先创建成员任务并写完 Syndra 证据和自动化验收要求，再改派智能体，复用 `EnqueueTaskForIssueByActor` 创建运行。成员仍是创建人、订阅人及运行责任人。入队失败会尝试恢复成员指派并记录错误。
@@ -96,7 +97,7 @@ Multica 当前状态和内部标记，避免源系统的 `resolved` 把未合入
 分支与交付流程由内置 `multica-fixing-syndra-bugs` skill 和两个校验脚本承接：
 
 - 以“Bug、版本、仓库、远端分支”为一组确认信息。当前创建人的有效回复，或明确关联该版本和仓库的项目映射，可以复用；普通项目 `ref`、默认分支提示和环境分支不能作为依据。
-- 模糊匹配只列候选。即使只有一个候选，没有确定证据也必须请王宁确认。多候选、缺失版本、信息冲突、远端不可访问或分支不存在均进入 `blocked`。
+- 模糊匹配只列候选。即使只有一个候选，没有确定证据也必须请当前人工指派人确认。多候选、缺失版本、信息冲突、远端不可访问或分支不存在均进入 `blocked`。
 - 读取最新远端分支，完整区分 `2.91.56`、`2.91.560`、`2.91.56.1`；不按 `_wn`、`_merge` 后缀猜测发布目标。
 - 复用托管 checkout 或 `local_directory.execution_mode=worktree`。每个受影响仓库使用独立修复分支和 PR，恢复运行时先读取已有讨论、分支和 PR，保护前轮工作。
 - 验证通过后按仓库规则合并并推送确认的版本分支，再把版本分支合入远端 `test` 并推送。GitHub 使用已验证 head 约束合并请求；进入队列或启用自动合并不算完成。脚本核对真实 merged 状态、PR base/head，并确认最新远端版本分支包含合并提交；`test` 还必须有独立的合并提交和远端包含性证据。其他 forge 必须取得同等证据。

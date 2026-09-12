@@ -41,6 +41,24 @@ func TestBugAutomationPilotEligibility(t *testing.T) {
 	}
 }
 
+func TestBugAutomationPilotEligibilityUsesConfiguredAssignees(t *testing.T) {
+	item := BugSyncItem{Assignee: BugSyncPerson{Name: strPtr("刘鹏")}}
+	allowed := configuredBugAutomationAssignees("王宁, 刘鹏")
+	if !bugAutomationPilotEligibleForNames("syndra", item, "", allowed) {
+		t.Fatal("configured assignee should be eligible")
+	}
+	if bugAutomationPilotEligibleForNames("syndra", item, "", configuredBugAutomationAssignees("王宁")) {
+		t.Fatal("unconfigured assignee should not be eligible")
+	}
+	got := configuredBugAutomationAssignees("")
+	if len(got) != 1 {
+		t.Fatalf("default allowlist = %#v, want only %q", got, bugAutomationPilotAssignee)
+	}
+	if _, ok := got[bugAutomationPilotAssignee]; !ok {
+		t.Fatalf("default allowlist = %#v, want %q", got, bugAutomationPilotAssignee)
+	}
+}
+
 func TestBugAutomationMirrorPreservesOnlyEnrolledDeliveryState(t *testing.T) {
 	for _, enrolled := range []bool{false, true} {
 		for _, currentStatus := range []string{"blocked", "in_progress", "in_review", "done"} {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -23,7 +24,7 @@ const bugAutomationPilotAssignee = "王宁"
 
 const bugAutomationMetadataKey = "multica_bug_automation"
 
-const bugAutomationAcceptance = "\n\n自动化验收：使用 multica-fixing-syndra-bugs skill。先确认每个仓库对应的版本分支；无法确认时请王宁人工确认。验证通过后必须取得本地验证及 CI 结果，将修复合入已确认的版本分支并推送远端，再将该版本分支合入 test 并推送远端；冲突解决后通知当前人工指派人。验证失败时提交当前修复快照到版本分支并 block 任务，通知当前人工指派人介入。仅创建 PR、进入合并队列或发布测试环境均不算完成。"
+const bugAutomationAcceptance = "\n\n自动化验收：使用 multica-fixing-syndra-bugs skill。先确认每个仓库对应的版本分支；无法确认时请当前人工指派人确认。验证通过后必须取得本地验证及 CI 结果，将修复合入已确认的版本分支并推送远端，再将该版本分支合入 test 并推送远端；冲突解决后通知当前人工指派人。验证失败时提交当前修复快照到版本分支并 block 任务，通知当前人工指派人介入。仅创建 PR、进入合并队列或发布测试环境均不算完成。"
 
 // Keep the pilot's delivery state local: an upstream 'resolved' event is not
 // proof that its fix reached the release branch. Other imports keep mirroring.
@@ -75,9 +76,30 @@ func (i *Importer) updateBugSyncMirror(ctx context.Context, existing db.Issue, t
 	return current, updated, nil
 }
 
+func configuredBugAutomationAssignees(raw string) map[string]struct{} {
+	if raw == "" {
+		raw = bugAutomationPilotAssignee
+	}
+	allowed := make(map[string]struct{})
+	for _, value := range strings.Split(raw, ",") {
+		if name := strings.TrimSpace(value); name != "" {
+			allowed[name] = struct{}{}
+		}
+	}
+	if len(allowed) == 0 {
+		allowed[bugAutomationPilotAssignee] = struct{}{}
+	}
+	return allowed
+}
+
 func bugAutomationPilotEligible(provider string, item BugSyncItem, fallbackReason string) bool {
+	return bugAutomationPilotEligibleForNames(provider, item, fallbackReason, configuredBugAutomationAssignees(""))
+}
+
+func bugAutomationPilotEligibleForNames(provider string, item BugSyncItem, fallbackReason string, allowed map[string]struct{}) bool {
+	_, allowedAssignee := allowed[bugPersonName(bugAssigneePerson(item))]
 	return provider == defaultBugProvider && fallbackReason == "" &&
-		bugPersonName(bugAssigneePerson(item)) == bugAutomationPilotAssignee
+		allowedAssignee
 }
 
 func bugAutomationEnrolled(metadata []byte) bool {
@@ -109,7 +131,7 @@ func (i *Importer) resolveBugDeveloperAssignmentForItem(
 	agents []db.Agent,
 ) bugDeveloperAssignment {
 	assignment := bugDeveloperAssignment{ReviewerID: reviewerID}
-	if bugAutomationPilotEligible(provider, item, fallbackReason) {
+	if bugAutomationPilotEligibleForNames(provider, item, fallbackReason, configuredBugAutomationAssignees(i.Config.BugAutomationAssignees)) {
 		assignment = resolveBugDeveloperAssignment(reviewerID, agents)
 	}
 	i.info("external bug sync: developer agent routing resolved",
