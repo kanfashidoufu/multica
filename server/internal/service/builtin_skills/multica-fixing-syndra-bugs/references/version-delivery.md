@@ -1,5 +1,14 @@
 # Integration and delivery proof
 
+The delivery target has two ordered remote updates:
+
+```text
+validated task/PR -> confirmed version branch -> test
+```
+
+The version branch is the release integration point. `test` is the verification
+promotion branch. Both pushes are required for a successful automation run.
+
 ## PR and validation
 
 Read `multica issue pull-requests <issue-id> --output json` to recover links and
@@ -45,7 +54,7 @@ required next action. A repository that defines no CI must have that fact
 verified from its configuration/protection rules; a missing snapshot is not
 such evidence. Local checks remain required.
 
-## Merge and verify
+## Merge into the version branch
 
 Re-read the creator's branch decision and the current issue version. Verify that
 this PR's repository/base still matches, its current head equals the tested
@@ -76,6 +85,72 @@ state and merge commit contained in a fresh remote target fetch. The bundled
 GitHub verifier does not support other providers. If these facts cannot be
 verified, require human integration help instead of reporting success.
 
+## Promote the confirmed version to `test`
+
+After version delivery is proven, use a fresh isolated integration checkout. Do
+not switch the task worktree onto a shared branch. Fetch both remote branches
+and merge the version tip into `test`:
+
+```bash
+git fetch --no-tags origin \
+  refs/heads/<confirmed-version-branch> \
+  refs/heads/test
+git switch --create "integration/<issue-key>-test" \
+  "refs/remotes/origin/test"
+git merge --no-ff "refs/remotes/origin/<confirmed-version-branch>" \
+  -m "merge <confirmed-version-branch> into test"
+```
+
+Run the repository's test-branch smoke or required checks, then push with a
+fast-forward-safe refspec:
+
+```bash
+git push origin HEAD:refs/heads/test
+```
+
+Verify the promotion from a fresh remote fetch before reporting delivery:
+
+```bash
+bash <this-skill-dir>/scripts/verify-test-promotion.sh \
+  <checkout-path> test <confirmed-version-tip-sha>
+```
+
+Only `promotion=merged` with exit status 0 proves that `test` contains the
+confirmed version tip. A local `test` branch, a successful push response, or a
+test deployment URL is not sufficient evidence.
+
+If `test` is protected, use the repository's required PR or merge queue flow
+without bypassing protection. The automation still waits for actual merge and
+remote containment. A push rejection caused by the branch advancing requires a
+fresh fetch, semantic merge and rerun of the checks.
+
+If this merge has conflicts, resolve them in the isolated integration checkout,
+run the affected checks, commit the merge and push `test`. After a successful
+resolution, comment with the conflict files, resolution summary, test result,
+version tip and test tip, mentioning the current human assignee. If semantics
+are unclear or checks fail, leave the issue `blocked` and request that assignee's
+intervention instead of guessing.
+
+## Validation failure path
+
+When local validation or required CI fails, preserve the work for the human and
+make the failed snapshot reachable from the confirmed version branch:
+
+1. Commit the current task changes with a clear validation-failed message and
+   push the task branch.
+2. In an isolated integration checkout, fetch the confirmed version branch and
+   merge the task commit into it with `--no-ff`.
+3. Push the version branch. Do not merge it into `test` while validation is
+   failing.
+4. Set the issue to `blocked --no-start` and comment with the failing command or
+   CI check, task commit, version merge commit and the exact repair request.
+   Mention the current human assignee so they can take over immediately.
+
+This branch commit is an intervention snapshot, not a successful delivery. Do
+not set `in_review`, report `delivery=merged` as success, or claim that `test`
+contains the fix. The next run must re-read the comments, preserve the current
+branch decision and continue from the pushed snapshot.
+
 On resumed work where the PR has already merged, recover the validated head and
 branch decision, then verify remote containment before making any edits. If
 historical validation evidence is missing, inspect the delivered commit and run
@@ -83,9 +158,10 @@ appropriate verification; never invent a prior successful check.
 
 ## Review handoff
 
-Only after every required repository has delivery proof, set `in_review` and
-report the tuple `(repo, version branch, PR, validated head, merge commit,
-fetched version tip)` with tests. `done` is human acceptance. A source-system
+Only after every required repository has both delivery proofs, set `in_review`
+and report the tuple `(repo, version branch, PR, validated head, version merge
+commit, fetched version tip, test merge commit, fetched test tip)` with tests.
+`done` is human acceptance. A source-system
 "resolved" status or a completed agent run is not proof of version integration.
 
 If a PR was merged to the wrong branch, preserve that fact, request any missing

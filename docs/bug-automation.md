@@ -7,7 +7,7 @@ Bug importer、内置 skill、脚本和测试。没有新增数据库迁移，�
 ## 运行链路
 
 Syndra 导入 → 王宁精确匹配与唯一智能体选择 → 写入证据及交付验收 → 智能体运行
-→ 确认版本分支 → 隔离修复和验证 → 合并版本 PR → 远端包含性验证 → `in_review`。
+→ 确认版本分支 → 隔离修复和验证 → 合并版本分支 → 推进 `test` → 远端包含性验证 → `in_review`。
 
 负责人或智能体不确定时保留成员处理。版本分支不能确认时，由创建人王宁在任务
 评论中明确确认；方案和合并不增加例行确认，但仓库保护规则仍然生效。
@@ -18,7 +18,7 @@ Syndra 导入 → 王宁精确匹配与唯一智能体选择 → 写入证据及
 | --- | --- |
 | `server/internal/externalissue/importer.go` | 复用当前 Bug 工作区、成员解析及镜像更新；仅新建流程接入派发；对已接入试运行的任务保留交付状态 |
 | `server/internal/externalissue/syndra_bug_agent_routing.go` | 王宁试运行限制、唯一可执行智能体选择、成员责任归属、入队失败恢复及局部同步规则 |
-| `server/internal/service/builtin_skills/multica-fixing-syndra-bugs/` | 分支证据、人工介入、工作恢复、最小修复、版本集成和交付验证 |
+| `server/internal/service/builtin_skills/multica-fixing-syndra-bugs/` | 分支证据、人工介入、工作恢复、最小修复、版本集成、`test` 推进和交付验证 |
 | `server/internal/service/syndra_bug_skill_test.go` | 临时 Git 远端与模拟 GitHub CLI 的可执行验证；不调用真实智能体或实际 PR |
 | `server/internal/externalissue/*test.go` | 试运行范围、原有成员回退、责任人、重复同步及失败恢复 |
 
@@ -47,13 +47,13 @@ PR 的关闭事件代表整个 Bug 已交付。
 
 `find-version-branches.sh` 使用 `ls-remote --heads`，拒绝多版本歧义并避免数字、
 点分段前缀误命中。`verify-version-delivery.sh` 在 GitHub 实际合并后读取 base、
-head、合并提交，核对 PR 属于 checkout 的实际远端仓库，精确 fetch 版本分支，并验证 merge commit 的祖先关系。它支持
+head、合并提交，核对 PR 属于 checkout 的实际远端仓库，精确 fetch 版本分支，并验证 merge commit 的祖先关系。`verify-test-promotion.sh` 再精确 fetch `test`，确认版本分支 tip 已进入 `test`。它支持
 squash 后原 PR head 不在目标历史中、以及合并后版本分支继续前进的情况。
 
 ## 边界
 
 - 这是 importer 的试运行规则和智能体执行合同，不是平台级禁止人工更改状态或 PR base 的硬约束。
 - GitHub 有随 skill 下发的交付验证脚本。其他 forge 复用已有工具取得相同证据；工具不足时转人工。
-- CI 或合并队列无法在当前运行中完成时，任务保留阻塞并要求后续回复或重试。没有引入新的后台轮询服务。
+- 验证失败、版本分支或 `test` 推进冲突无法安全解决、CI 或合并队列无法在当前运行中完成时，任务保留阻塞并通知当前人工指派人；没有引入新的后台轮询服务。
 - 源 Bug 改负责人或版本不会取消已经运行的通用任务；skill 在恢复与合并前复验范围和分支，发现变化即停止。
 - 贮藏中的无关 `apps/web/next-env.d.ts` 修改保留；本轮没有改动它。

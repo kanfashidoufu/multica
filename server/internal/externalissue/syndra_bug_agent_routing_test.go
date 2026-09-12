@@ -120,7 +120,9 @@ func TestBugAutomationImportPilotAndRepeatedSync(t *testing.T) {
 			if issue.AssigneeID != pilotAgent.ID || len(queued) != 1 || queued[0].AccountableUserID != pilot.User.ID {
 				t.Fatal("pilot task lost agent or accountable human")
 			}
-			if !strings.Contains(issue.Description.String, bugAutomationAcceptance) {
+			if !strings.Contains(issue.Description.String, bugAutomationAcceptance) ||
+				!strings.Contains(issue.Description.String, "合入 test") ||
+				!strings.Contains(issue.Description.String, "验证失败时提交当前修复快照") {
 				t.Fatal("missing CI and integration acceptance criteria")
 			}
 			_, err = q.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID, Status: "blocked"})
