@@ -51,7 +51,7 @@ test.describe("Settings", () => {
     page,
   }) => {
     const workspaceSlug = await loginAsDefault(page);
-    const settingsUrl = `/${workspaceSlug}/settings?tab=integrations`;
+    const settingsUrl = `/${workspaceSlug}/settings?tab=integrations&integration=composio`;
 
     // Composio remains disabled by default on local/self-host deployments.
     // Enable only this test's browser-side config response.
