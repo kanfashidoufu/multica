@@ -406,6 +406,7 @@ func (h *Handler) groupChatMessageAttachments(ctx context.Context, workspaceID s
 // ---------------------------------------------------------------------------
 
 func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
+	r = h.withWakeupActor(r)
 	if h.Storage == nil {
 		writeFeatureDisabled(w, "file_upload_not_configured", "file upload not configured")
 		return
@@ -609,7 +610,9 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			att, err = h.Queries.CreateAttachment(r.Context(), params)
+			att, err = wakeupWrite(h, r, func(q *db.Queries) (db.CreateAttachmentRow, error) {
+				return q.CreateAttachment(r.Context(), params)
+			})
 		}
 		if err != nil {
 			slog.Error("failed to create attachment record", "error", err)
@@ -1405,6 +1408,7 @@ func isTextPreviewable(contentType, filename string) bool {
 	}
 	switch ct {
 	case "application/json",
+		"application/x-ndjson",
 		"application/javascript",
 		"application/xml",
 		"application/x-yaml",
@@ -1421,7 +1425,7 @@ func isTextPreviewable(contentType, filename string) bool {
 		".txt", ".log",
 		".csv", ".tsv",
 		".html", ".htm",
-		".json", ".xml",
+		".json", ".jsonl", ".ndjson", ".xml",
 		".yml", ".yaml", ".toml", ".ini", ".conf",
 		".sh", ".bash", ".zsh",
 		".py", ".rb", ".go", ".rs",
@@ -1448,6 +1452,7 @@ func isTextPreviewable(contentType, filename string) bool {
 // ---------------------------------------------------------------------------
 
 func (h *Handler) DeleteAttachment(w http.ResponseWriter, r *http.Request) {
+	r = h.withWakeupActor(r)
 	attachmentID := chi.URLParam(r, "id")
 	workspaceID := h.resolveWorkspaceID(r)
 	if workspaceID == "" {
@@ -1590,7 +1595,7 @@ func (h *Handler) withAttachmentOwnerLock(ctx context.Context, att db.Attachment
 var errAttachmentOwnerChanged = errors.New("attachment owner changed")
 
 func (h *Handler) attachmentOwnerLockAttempt(ctx context.Context, att db.Attachment, write func(*db.Queries) error) (db.Attachment, error) {
-	tx, err := h.TxStarter.Begin(ctx)
+	tx, err := h.beginWakeupWrite(ctx)
 	if err != nil {
 		return db.Attachment{}, err
 	}

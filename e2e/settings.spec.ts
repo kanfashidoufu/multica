@@ -124,13 +124,15 @@ test.describe("Settings", () => {
     });
 
     await page.goto(settingsUrl, { waitUntil: "domcontentloaded" });
-    await waitForPageText(page, "Composio");
+    await expect(
+      page.getByRole("heading", { name: "Connected apps", exact: true }),
+    ).toBeVisible();
 
     // Notion starts disconnected → click Connect.
     await page.getByRole("button", { name: /^Connect$/ }).first().click();
 
     // Success toast from the simulated callback redirect.
-    await expect(page.getByText("Connected").first()).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText("Connected", { exact: true }).first()).toBeVisible({ timeout: 10000 });
 
     // List refreshed without a manual reload: the Notion card now offers
     // Disconnect, and the one-shot ?connected param has been stripped.

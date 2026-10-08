@@ -233,6 +233,8 @@ node -e '
   if (payload.backend_port !== 18981) throw new Error("backend_port = " + payload.backend_port);
   for (const key of ["api", "web", "daemon", "desktop"]) {
     if (!payload.components[key]) throw new Error("missing component " + key);
+    // A built CLI reports an absent test profile explicitly.
+    if (key === "daemon" && payload.components[key].state === "unknown_profile") continue;
     if (payload.components[key].state !== "stopped") {
       throw new Error(key + " state = " + payload.components[key].state);
     }
@@ -268,6 +270,13 @@ MULTICA_WORKSPACES_ROOT=/owner/workspaces \
     test "$MULTICA_WORKSPACES_ROOT" = "$1"
   ' _ "$MULTICA_DEV_WORKSPACES_PARENT/multica_workspaces_dev-dev-env-test-903" \
   > "$out" 2>&1 || fail "env-exec leaked daemon task identity or owner workspaces root"
+
+# Reloading the checkout env file must not replace the registry allocation.
+dev_env exec clean-env-903 -- sh -c '
+  test "$FRONTEND_PORT" = 13903 &&
+  test "$POSTGRES_DB" = multica_dev_env_test_903 &&
+  test "$DATABASE_URL" = postgres://multica:multica@localhost:5432/multica_dev_env_test_903?sslmode=disable
+' > "$out" 2>&1 || fail "env-exec replaced registry ports or database with env-file defaults"
 
 # A health response without process identity is never proof that the process is
 # this checkout's freshly launched API.

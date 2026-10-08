@@ -569,7 +569,7 @@ Run 'make down' here first — a leftover instance answers /health with 200 and 
   fi
 
   launched_at="$(now_epoch)"
-  launch_detached api make -C "$REPO_ROOT" -s api-dev ENV_FILE="$ENV_FILE"
+  launch_detached api make -e -C "$REPO_ROOT" -s api-dev ENV_FILE="$ENV_FILE"
   info "api launching (pid $(cat "$(pid_file api)")), log: $(log_file api)"
 
   while [ "$waited" -lt 300 ]; do
@@ -608,7 +608,8 @@ start_web() {
     die "Port $FRONTEND_PORT is busy: $(describe_port_owner "$FRONTEND_PORT"). Run 'make down' here first."
   fi
 
-  launch_detached web make -C "$REPO_ROOT" -s web-dev ENV_FILE="$ENV_FILE"
+  # Keep registry values above the env file reloaded by the child Makefile.
+  launch_detached web make -e -C "$REPO_ROOT" -s web-dev ENV_FILE="$ENV_FILE"
   info "web launching (pid $(cat "$(pid_file web)")), log: $(log_file web)"
 
   while [ "$waited" -lt 300 ]; do
@@ -781,7 +782,7 @@ VITE_WS_URL=ws://localhost:${BACKEND_PORT}/ws
 EOF
   launch_detached desktop env \
     DESKTOP_RENDERER_PORT="$DESKTOP_RENDERER_PORT" DESKTOP_APP_SUFFIX="$DESKTOP_APP_SUFFIX" \
-    make -C "$REPO_ROOT" -s desktop-dev ENV_FILE="$ENV_FILE"
+    make -e -C "$REPO_ROOT" -s desktop-dev ENV_FILE="$ENV_FILE"
 
   while [ "$waited" -lt 300 ]; do
     if curl -sf --max-time 10 "http://localhost:${DESKTOP_RENDERER_PORT}" >/dev/null 2>&1; then
@@ -1236,6 +1237,8 @@ Start the rest with 'make up C=api,web', or run 'make up C=daemon' from your own
   # The manifest is the source of truth from here on; re-export so every child
   # sees the same values the registry recorded.
   export PORT="$BACKEND_PORT" FRONTEND_PORT DATABASE_URL POSTGRES_DB="$DB_NAME"
+  # The allocated web port may differ from a reused env file's origin list.
+  export CORS_ALLOWED_ORIGINS="${CORS_ALLOWED_ORIGINS:+$CORS_ALLOWED_ORIGINS,}http://localhost:$FRONTEND_PORT"
 
   if [ ! -d "$REPO_ROOT/node_modules" ] && { component_selected web || component_selected desktop; }; then
     step "Dependencies"
@@ -1474,9 +1477,12 @@ cmd_exec() {
   [ $# -gt 0 ] || die "Usage: dev-env.sh exec [name] -- <command> [args...]"
 
   resolve_env_for_read "$name"
+  local resolved_name="$NAME"
   mkdir -p "$DEV_TMPDIR"
   cd "$DIR"
   load_env_file "$ENV_FILE" "$DIR"
+  # The env file supplies credentials and flags; the registry owns allocation.
+  load_manifest "$resolved_name"
   export PORT="$BACKEND_PORT" FRONTEND_PORT DATABASE_URL POSTGRES_DB="$DB_NAME"
   export TMPDIR="$DEV_TMPDIR" TMP="$DEV_TMPDIR" TEMP="$DEV_TMPDIR"
   export MULTICA_DEV_PROFILE="$PROFILE"

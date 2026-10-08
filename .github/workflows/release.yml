@@ -13,6 +13,12 @@ permissions:
   contents: write
   packages: write
 
+# Deleting and recreating a tag can enqueue multiple runs for the same ref.
+# Serialize them so publishers never race while replacing same-name assets.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -492,6 +498,9 @@ jobs:
           # the tag push, so private forks publish to their own Releases page.
           MULTICA_RELEASE_REPOSITORY: ${{ github.repository }}
           VITE_RELEASE_REPOSITORY: ${{ github.repository }}
+          # Same-tag reruns must also replace Desktop assets after the
+          # publisher's default two-hour safety window has elapsed.
+          EP_GH_IGNORE_TIME: "true"
           # Disable code signing on Linux/Windows for now — the public
           # release is unsigned for these platforms, the CLI carries the
           # trust boundary. Set CSC_LINK in repo secrets to enable
