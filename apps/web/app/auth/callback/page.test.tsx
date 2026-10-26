@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import type { SupportedLocale } from "@multica/core/i18n";
 import { I18nProvider } from "@multica/core/i18n/react";
 import { paths } from "@multica/core/paths";
@@ -155,6 +156,28 @@ describe("CallbackPage", () => {
     mockListWorkspaces.mockResolvedValue([]);
     mockListMyInvitations.mockResolvedValue([]);
   });
+
+  it.each(["google", "lark"])(
+    "exchanges a %s authorization code only once when React replays effects",
+    async (provider) => {
+      mockSearchParams.set("provider", provider);
+
+      render(
+        <StrictMode>
+          <I18nProvider locale="en" resources={RESOURCES}>
+            <CallbackPage />
+          </I18nProvider>
+        </StrictMode>,
+      );
+
+      await waitFor(() => {
+        expect(mockPush).toHaveBeenCalledWith(paths.newWorkspace());
+      });
+      const login = provider === "lark" ? mockLoginWithLark : mockLoginWithGoogle;
+      expect(login).toHaveBeenCalledTimes(1);
+      expect(mockListWorkspaces).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("renders callback errors in the selected locale", async () => {
     mockSearchParams.delete("code");

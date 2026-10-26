@@ -24,6 +24,7 @@ import {
   DialogTitle,
 } from "@multica/ui/components/ui/dialog";
 import { Button } from "@multica/ui/components/ui/button";
+import { TooltipHint } from "@multica/ui/components/common/tooltip-hint";
 import { CODE_LIGATURE_CLASS } from "@multica/ui/lib/code-style";
 import { copyText } from "@multica/ui/lib/clipboard";
 import {
@@ -164,9 +165,7 @@ export function ConnectRemoteDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-// ---------------------------------------------------------------------------
 // Copy button + code row — mirrors onboarding/CliInstallInstructions
-// ---------------------------------------------------------------------------
 
 function CopyButton({ text, ariaLabel }: { text: string; ariaLabel: string }) {
   const [copied, setCopied] = useState(false);
@@ -184,18 +183,20 @@ function CopyButton({ text, ariaLabel }: { text: string; ariaLabel: string }) {
   };
 
   return (
-    <button
-      type="button"
-      onClick={handleCopy}
-      aria-label={ariaLabel}
-      className="shrink-0 rounded-xs p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-    >
-      {copied ? (
-        <Check className="h-3.5 w-3.5 text-success" aria-hidden />
-      ) : (
-        <Copy className="h-3.5 w-3.5" aria-hidden />
-      )}
-    </button>
+    <TooltipHint label={ariaLabel}>
+      <button
+        type="button"
+        onClick={handleCopy}
+        aria-label={ariaLabel}
+        className="shrink-0 rounded-xs p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {copied ? (
+          <Check className="h-3.5 w-3.5 text-success" aria-hidden />
+        ) : (
+          <Copy className="h-3.5 w-3.5" aria-hidden />
+        )}
+      </button>
+    </TooltipHint>
   );
 }
 
@@ -238,9 +239,7 @@ function CommandStep({
   );
 }
 
-// ---------------------------------------------------------------------------
 // Step 1: Instructions
-// ---------------------------------------------------------------------------
 
 function InstructionsStep({ onClose }: { onClose: () => void }) {
   const { t } = useT("runtimes");
@@ -364,9 +363,7 @@ function TroubleshootingDetails({ tokenCmd }: { tokenCmd: string }) {
   );
 }
 
-// ---------------------------------------------------------------------------
 // Live-listening indicator
-// ---------------------------------------------------------------------------
 
 function LiveListening() {
   const { t } = useT("runtimes");
@@ -387,9 +384,7 @@ function LiveListening() {
   );
 }
 
-// ---------------------------------------------------------------------------
 // Step 2: Success
-// ---------------------------------------------------------------------------
 
 function SuccessStep({
   onGoToAgents,

@@ -131,7 +131,17 @@ func TestCleanupSourceContextObjectIntentsBoundsAttemptsNotSuccesses(t *testing.
 		t.Fatalf("cleaned intents = %d, want 0 while every delete fails", cleaned)
 	}
 	if got := store.attemptCount(); got != 2 {
-		t.Fatalf("delete attempts = %d, want the batch size of 2 (a failing store must not extend the round)", got)
+		var pending, deleting, leased, deferred int
+		if err := tx.QueryRow(ctx, `
+			SELECT count(*) FILTER (WHERE state = 'pending'),
+			       count(*) FILTER (WHERE state = 'deleting'),
+			       count(*) FILTER (WHERE lease_token IS NOT NULL),
+			       count(*) FILTER (WHERE next_attempt_at > now())
+			FROM issue_source_context_object_intent WHERE storage_key = ANY($1::text[])
+		`, keys).Scan(&pending, &deleting, &leased, &deferred); err != nil {
+			t.Fatalf("inspect intent states: %v", err)
+		}
+		t.Fatalf("delete attempts = %d, want the batch size of 2; pending=%d deleting=%d leased=%d deferred=%d", got, pending, deleting, leased, deferred)
 	}
 	for i, bounded := range store.deadlineBounded {
 		if !bounded {
@@ -139,15 +149,20 @@ func TestCleanupSourceContextObjectIntentsBoundsAttemptsNotSuccesses(t *testing.
 		}
 	}
 
-	var due int
+	var due, leased int
 	if err := tx.QueryRow(ctx, `
-		SELECT count(*) FROM issue_source_context_object_intent
-		WHERE storage_key = ANY($1::text[]) AND next_attempt_at <= now()
-	`, keys).Scan(&due); err != nil {
+		SELECT count(*) FILTER (WHERE next_attempt_at <= now()),
+		       count(*) FILTER (WHERE lease_token IS NOT NULL)
+		FROM issue_source_context_object_intent
+		WHERE storage_key = ANY($1::text[])
+	`, keys).Scan(&due, &leased); err != nil {
 		t.Fatalf("count remaining due intents: %v", err)
 	}
 	if due != 1 {
 		t.Fatalf("still-due seeded intents = %d, want 1 (the two attempted rows carry a retry backoff)", due)
+	}
+	if leased != 0 {
+		t.Fatalf("leased intents = %d, want 0 (unprocessed rows must remain available)", leased)
 	}
 }
 

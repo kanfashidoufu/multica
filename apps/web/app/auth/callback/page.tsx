@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { sanitizeNextUrl, useAuthStore } from "@multica/core/auth";
@@ -40,6 +40,7 @@ function CallbackContent() {
   const loginWithLark = useAuthStore((s) => s.loginWithLark);
   const [error, setError] = useState<CallbackError | null>(null);
   const [desktopToken, setDesktopToken] = useState<string | null>(null);
+  const exchangedCodeRef = useRef<string | null>(null);
 
   useEffect(() => {
     const code = searchParams.get("code");
@@ -62,6 +63,10 @@ function CallbackContent() {
     const state = searchParams.get("state") || "";
     const stateParts = state.split(",");
     const provider = searchParams.get("provider") === "lark" ? "lark" : "google";
+    const exchangeKey = `${provider}:${code}`;
+    // OAuth codes are single-use, including when React replays this effect.
+    if (exchangedCodeRef.current === exchangeKey) return;
+    exchangedCodeRef.current = exchangeKey;
     const isDesktop = stateParts.includes("platform:desktop");
     const nextPart = stateParts.find((p) => p.startsWith("next:"));
     // Strip "next:" prefix, then drop anything that isn't a safe relative path

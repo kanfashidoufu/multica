@@ -410,6 +410,72 @@ describe("LoginPage", () => {
     ).not.toBeInTheDocument();
   });
 
+  it.each([
+    ["https://accounts.feishu.cn/open-apis/authen/v1/authorize", "app_id"],
+    ["https://accounts.feishu.cn/accounts/page/passport", "client_id"],
+  ])("preserves Lark OAuth parameters for %s", async (authorizeUrl, appIDParam) => {
+    const redirectUri = "https://multica.example/auth/callback?provider=lark";
+    renderWithI18n(
+      <LoginPage
+        onSuccess={onSuccess}
+        showEmailLogin={false}
+        lark={{
+          appId: "lark-app",
+          authorizeUrl,
+          redirectUri,
+          state: "platform:desktop",
+        }}
+      />,
+    );
+
+    await userEvent.setup().click(screen.getByRole("button", { name: /lark/i }));
+
+    const target = new URL(window.location.href);
+    expect(target.searchParams.get(appIDParam)).toBe("lark-app");
+    expect(target.searchParams.get("redirect_uri")).toBe(redirectUri);
+    expect(target.searchParams.get("response_type")).toBe("code");
+    expect(target.searchParams.get("state")).toBe("platform:desktop");
+  });
+
+  it("keeps Lark-only login and the session-expired notice", () => {
+    mockAuthState.expired = true;
+    renderWithI18n(
+      <LoginPage
+        onSuccess={onSuccess}
+        onLarkLogin={vi.fn()}
+        onGoogleLogin={vi.fn()}
+        showEmailLogin={false}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /lark/i })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Email")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /google/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(enAuth.errors.session_expired)).toBeInTheDocument();
+  });
+
+  it("uses the desktop Lark handler instead of navigating the current window", async () => {
+    const onLarkLogin = vi.fn();
+    renderWithI18n(
+      <LoginPage
+        onSuccess={onSuccess}
+        onLarkLogin={onLarkLogin}
+        lark={{
+          appId: "lark-app",
+          authorizeUrl: "https://accounts.feishu.cn",
+          redirectUri: "https://multica.example/auth/callback",
+        }}
+      />,
+    );
+
+    await userEvent.setup().click(screen.getByRole("button", { name: /lark/i }));
+
+    expect(onLarkLogin).toHaveBeenCalledOnce();
+    expect(window.location.href).toBe("http://localhost:3000");
+  });
+
   // -------------------------------------------------------------------------
   // CLI callback — existing session
   // -------------------------------------------------------------------------

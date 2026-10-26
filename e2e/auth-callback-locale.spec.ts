@@ -7,13 +7,13 @@ for (const scenario of [
     name: "different account language",
     language: "ja",
     htmlLang: "ja-JP",
-    continueLabel: "ウェブで続ける",
+    workspaceHeading: "ワークスペースに名前を付けましょう。",
   },
   {
     name: "same account language",
     language: "zh-Hans",
     htmlLang: "zh-CN",
-    continueLabel: "在 web 端继续",
+    workspaceHeading: "给工作区起个名字。",
   },
 ]) {
   test(`Google callback keeps its single-use code while synchronizing ${scenario.name}`, async ({
@@ -25,6 +25,9 @@ for (const scenario of [
       throw new Error("The callback regression requires a configured baseURL");
     }
     const origin = new URL(baseURL).origin;
+    const apiOrigin = process.env.NEXT_PUBLIC_API_URL
+      ? new URL(process.env.NEXT_PUBLIC_API_URL, origin).origin
+      : origin;
     const code = "locale-regression-code";
     const user = {
       id: "66666666-6666-4666-8666-666666666666",
@@ -77,7 +80,7 @@ for (const scenario of [
     await context.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
-      if (url.origin !== origin) {
+      if (url.origin !== origin && url.origin !== apiOrigin) {
         if (
           /(^|\.)(google\.com|googleapis\.com|googleusercontent\.com)$/.test(url.hostname)
         ) {
@@ -143,10 +146,10 @@ for (const scenario of [
       ).toBe("zh-Hans");
       releaseWorkspaces();
 
-      await expect(page).toHaveURL(`${origin}/onboarding`, { timeout: 15000 });
+      await expect(page).toHaveURL(`${origin}/workspaces/new`, { timeout: 15000 });
       await expect(page.locator("html")).toHaveAttribute("lang", scenario.htmlLang);
       await expect(
-        page.getByRole("button", { name: scenario.continueLabel, exact: true }),
+        page.getByRole("heading", { name: scenario.workspaceHeading, exact: true }),
       ).toBeVisible();
       expect(
         (await context.cookies(origin)).find((cookie) => cookie.name === "multica-locale")?.value,

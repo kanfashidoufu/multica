@@ -3,6 +3,7 @@ import { useStore } from "zustand";
 
 interface ConfigState {
   cdnDomain: string;
+  attachmentPublicUrl: string;
   // True when cdnDomain serves private content via time-bounded signed URLs
   // (CloudFront signing enabled server-side). Renderers must not treat a raw
   // storage URL on that domain as a loadable media source (MUL-3254).
@@ -48,6 +49,7 @@ interface ConfigState {
   // promises nothing about replies and uses the legacy delete route.
   commentDeleteKeepRepliesSupported: boolean;
   setCdnConfig: (config: { cdnDomain: string; cdnSigned?: boolean }) => void;
+  setAttachmentPublicUrl: (url?: string) => void;
   setAuthConfig: (config: {
     allowSignup: boolean;
     googleClientId?: string;
@@ -72,6 +74,7 @@ interface ConfigState {
 
 export const configStore = createStore<ConfigState>((set) => ({
   cdnDomain: "",
+  attachmentPublicUrl: "",
   cdnSigned: false,
   allowSignup: true,
   googleClientId: "",
@@ -90,6 +93,7 @@ export const configStore = createStore<ConfigState>((set) => ({
   issueCreatePropertiesSupported: false,
   commentDeleteKeepRepliesSupported: false,
   setCdnConfig: ({ cdnDomain, cdnSigned = false }) => set({ cdnDomain, cdnSigned }),
+  setAttachmentPublicUrl: (url = "") => set({ attachmentPublicUrl: url }),
   setAuthConfig: ({
     allowSignup,
     googleClientId = "",
