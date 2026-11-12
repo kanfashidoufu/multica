@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { TriangleAlert } from "lucide-react";
+import { TriangleAlert } from "@multica/ui/icons";
 import { toast } from "sonner";
 import { cn } from "@multica/ui/lib/utils";
 import {
@@ -657,6 +657,7 @@ export function ChatInput({
     >
       <div
         data-slot="chat-input-surface"
+        data-mc="chat-input"
         {...(uploadEnabled ? dropZoneProps : {})}
         className={cn(
           // max-h-96 is the absolute ceiling on top of the wrapper's 50%: on a

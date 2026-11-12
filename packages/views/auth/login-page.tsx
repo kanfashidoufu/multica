@@ -23,7 +23,7 @@ import { useAuthStore } from "@multica/core/auth";
 import { workspaceKeys } from "@multica/core/workspace/queries";
 import { api } from "@multica/core/api";
 import type { User } from "@multica/core/types";
-import { QrCode } from "lucide-react";
+import { QrCode } from "@multica/ui/icons";
 import { useT } from "../i18n";
 
 // Types

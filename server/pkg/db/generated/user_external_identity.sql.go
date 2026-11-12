@@ -12,7 +12,7 @@ import (
 )
 
 const getUserByExternalIdentity = `-- name: GetUserByExternalIdentity :one
-SELECT u.id, u.name, u.email, u.avatar_url, u.created_at, u.updated_at, u.onboarded_at, u.onboarding_questionnaire, u.cloud_waitlist_email, u.cloud_waitlist_reason, u.starter_content_state, u.language, u.profile_description, u.timezone
+SELECT u.id, u.name, u.email, u.avatar_url, u.created_at, u.updated_at, u.onboarded_at, u.onboarding_questionnaire, u.cloud_waitlist_email, u.cloud_waitlist_reason, u.starter_content_state, u.language, u.profile_description, u.timezone, u.whats_new_seen_version, u.star_prompt_shown_count, u.star_prompt_last_shown_at, u.star_prompt_starred_at
 FROM user_external_identity x
 JOIN "user" u ON u.id = x.user_id
 WHERE x.provider = $1
@@ -62,12 +62,16 @@ func (q *Queries) GetUserByExternalIdentity(ctx context.Context, arg GetUserByEx
 		&i.Language,
 		&i.ProfileDescription,
 		&i.Timezone,
+		&i.WhatsNewSeenVersion,
+		&i.StarPromptShownCount,
+		&i.StarPromptLastShownAt,
+		&i.StarPromptStarredAt,
 	)
 	return i, err
 }
 
 const getWorkspaceMemberByExternalIdentity = `-- name: GetWorkspaceMemberByExternalIdentity :one
-SELECT m.id, m.workspace_id, m.user_id, m.role, m.created_at
+SELECT m.id, m.workspace_id, m.user_id, m.role, m.created_at, m.pinned_at
 FROM user_external_identity x
 JOIN member m ON m.user_id = x.user_id
 WHERE m.workspace_id = $1
@@ -108,6 +112,7 @@ func (q *Queries) GetWorkspaceMemberByExternalIdentity(ctx context.Context, arg 
 		&i.UserID,
 		&i.Role,
 		&i.CreatedAt,
+		&i.PinnedAt,
 	)
 	return i, err
 }

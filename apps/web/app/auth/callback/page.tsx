@@ -18,7 +18,8 @@ import {
 } from "@multica/ui/components/ui/card";
 import { Button } from "@multica/ui/components/ui/button";
 import { useT } from "@multica/views/i18n";
-import { Loader2 } from "lucide-react";
+import { Loader2 } from "@multica/ui/icons";
+import { CliCallbackError } from "@/features/auth/cli-callback-error";
 import { callbackErrorFrom, type CallbackError } from "./callback-error";
 
 const authLogger = createLogger("auth.callback");
@@ -78,14 +79,23 @@ function CallbackContent() {
       stateParts.find((p) => p.startsWith("cli_callback:")) ??
       stateParts.find((p) => p.startsWith("cli:"));
     const cliStatePart = stateParts.find((p) => p.startsWith("cli_state:"));
-    const cliCallbackRaw = cliCallbackPart
-      ? safeDecodeURIComponent(
-          cliCallbackPart.slice(cliCallbackPart.indexOf(":") + 1),
-        )
-      : null;
-    const cliState = cliStatePart
-      ? safeDecodeURIComponent(cliStatePart.slice("cli_state:".length))
-      : "";
+    let cliCallback: string | null = null;
+    let cliState = "";
+    try {
+      if (cliCallbackPart !== undefined) {
+        cliCallback = decodeURIComponent(cliCallbackPart.slice(cliCallbackPart.indexOf(":") + 1));
+        if (!validateCliCallback(cliCallback)) {
+          setError({ kind: "invalid_cli_callback" });
+          return;
+        }
+      }
+      if (cliStatePart !== undefined) {
+        cliState = decodeURIComponent(cliStatePart.slice("cli_state:".length));
+      }
+    } catch {
+      setError({ kind: "invalid_cli_callback" });
+      return;
+    }
 
     const redirectUri =
       provider === "lark"
@@ -96,15 +106,6 @@ function CallbackContent() {
         ? (authCode: string, uri: string) => api.larkLogin(authCode, uri)
         : (authCode: string, uri: string) => api.googleLogin(authCode, uri);
     const storeLogin = provider === "lark" ? loginWithLark : loginWithGoogle;
-
-    // Validate the CLI callback URL before redirecting — the state parameter
-    // passes through OAuth and must be treated as attacker-controlled. Lark's
-    // current login state uses the legacy `cli:` key while Google uses
-    // `cli_callback:`; accept both so either provider can complete CLI auth.
-    const cliCallback =
-      cliCallbackRaw && validateCliCallback(cliCallbackRaw)
-        ? cliCallbackRaw
-        : null;
 
     if (cliCallback) {
       oauthLogin(code, redirectUri)
@@ -187,6 +188,8 @@ function CallbackContent() {
   const errorDescription = (() => {
     if (!error) return null;
     switch (error.kind) {
+      case "invalid_cli_callback":
+        return null;
       case "raw":
         return error.text;
       case "missing_code":
@@ -234,6 +237,8 @@ function CallbackContent() {
       </div>
     );
   }
+
+  if (error?.kind === "invalid_cli_callback") return <CliCallbackError />;
 
   if (error) {
     return (

@@ -1,15 +1,11 @@
 import { test, expect } from "@playwright/test";
-import { loginAsDefault, waitForPageText } from "./helpers";
+import { appRail, loginAsDefault, waitForPageText } from "./helpers";
 
 test.describe("Settings", () => {
-  test("updating workspace name reflects in sidebar immediately", async ({
+  test("updating workspace name reflects in the workspace menu immediately", async ({
     page,
   }) => {
     const workspaceSlug = await loginAsDefault(page);
-
-    // Read the current workspace name from the sidebar
-    const sidebarName = page.getByRole("button", { name: /E2E Workspace/ }).first();
-    const originalName = (await sidebarName.innerText()).split("\n").pop()?.trim() ?? "E2E Workspace";
 
     await page.goto(`/${workspaceSlug}/settings?tab=workspace`, { waitUntil: "domcontentloaded" });
     await waitForPageText(page, "General");
@@ -19,6 +15,7 @@ test.describe("Settings", () => {
       name: "Name",
       exact: true,
     });
+    const originalName = await nameInput.inputValue();
     await nameInput.clear();
     const newName = "Renamed WS " + Date.now();
     await nameInput.fill(newName);
@@ -28,18 +25,19 @@ test.describe("Settings", () => {
       page.getByRole("status").filter({ hasText: "Saved" }),
     ).toBeVisible({ timeout: 5000 });
 
-    // Sidebar should reflect the new name WITHOUT page refresh
-    await expect(
-      page.getByRole("button", { name: new RegExp(newName) }).first(),
-    ).toBeVisible();
+    // The workspace menu updates without a page refresh.
+    const switcher = appRail(page).getByRole("button", { name: "Switch workspace" });
+    await switcher.click();
+    await expect(page.getByRole("menuitem").filter({ hasText: newName })).toBeVisible();
+    await page.keyboard.press("Escape");
 
     // Restore original name so other tests aren't affected
     await nameInput.clear();
     await nameInput.fill(originalName.trim());
     await nameInput.press("Tab");
-    await expect(
-      page.getByRole("button", { name: new RegExp(originalName) }).first(),
-    ).toBeVisible();
+    await switcher.click();
+    await expect(page.getByRole("menuitem").filter({ hasText: originalName.trim() })).toBeVisible();
+    await page.keyboard.press("Escape");
   });
 
   // Composio connect flow, fully mocked at the network boundary so it runs

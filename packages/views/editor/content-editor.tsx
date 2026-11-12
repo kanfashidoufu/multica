@@ -125,6 +125,7 @@ function isInNodeViewChrome(target: HTMLElement): boolean {
 // Types
 
 interface ContentEditorBaseProps {
+  ariaLabel?: string;
   /**
    * `baseMarkdown` is the last authoritative controlled value this editor
    * actually adopted before producing `markdown`. A dirty-editor realtime
@@ -136,6 +137,8 @@ interface ContentEditorBaseProps {
   className?: string;
   debounceMs?: number;
   onSubmit?: () => void;
+  /** Fixed annotation keys: Enter saves, Shift+Enter breaks, Mod+Enter submits. */
+  onEnter?: () => void;
   onBlur?: () => void;
   /**
    * Upload transport. `uploadId` is minted by the editor when it inserts the
@@ -363,12 +366,14 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
   function ContentEditor(
     {
       defaultValue,
+      ariaLabel,
       value,
       onUpdate,
       placeholder: placeholderText = "",
       className,
       debounceMs = 300,
       onSubmit,
+      onEnter,
       onBlur,
       onUploadFile,
       pasteAsFileThreshold,
@@ -397,6 +402,7 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
     const pendingBaseRef = useRef<string | null>(null);
     const onUpdateRef = useRef(onUpdate);
     const onSubmitRef = useRef(onSubmit);
+    const onEnterRef = useRef(onEnter);
     const onBlurRef = useRef(onBlur);
     const onReadyRef = useRef(onReady);
     const onUploadingChangeRef = useRef(onUploadingChange);
@@ -412,6 +418,7 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
     // set is built once at mount, so a directly-captured options object would
     // freeze whatever closures existed then and stop seeing new quick actions.
     const quickActionMenuRef = useRef<BuiltinCommandSuggestionOptions | undefined>(quickActionMenu);
+    const quickActionMenuListeners = useRef(new Set<() => void>());
     const lastEmittedRef = useRef<string | null>(null);
     // `content` already consumes the initial synchronized value when Tiptap
     // mounts. Track later changes separately so the sync effect does not parse
@@ -506,6 +513,7 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
     // Keep refs in sync without recreating editor
     onUpdateRef.current = onUpdate;
     onSubmitRef.current = onSubmit;
+    onEnterRef.current = onEnter;
     onBlurRef.current = onBlur;
     onReadyRef.current = onReady;
     onUploadingChangeRef.current = onUploadingChange;
@@ -608,6 +616,7 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
         placeholder: () => placeholderRef.current,
         queryClient,
         onSubmitRef,
+        onEnterRef,
         onUploadFileRef,
         pasteAsFileThresholdRef,
         disableMentions,
@@ -617,10 +626,12 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
         slashCommandMode,
         quickActionMenu: {
           getQuickActions: () => quickActionMenuRef.current?.getQuickActions?.() ?? [],
-          renderQuickAction: (id: string) =>
-            quickActionMenuRef.current?.renderQuickAction?.(id) ?? Promise.resolve(""),
-          onRenderError: (error: unknown) =>
-            quickActionMenuRef.current?.onRenderError?.(error),
+          subscribeQuickActions: (refresh) => {
+            quickActionMenuListeners.current.add(refresh);
+            return () => { quickActionMenuListeners.current.delete(refresh); };
+          },
+          getQuickActionContent: (id: string) =>
+            quickActionMenuRef.current?.getQuickActionContent?.(id) ?? "",
         },
         resolveIssueIdentifierRef,
       }),
@@ -686,9 +697,17 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
         },
         attributes: {
           class: cn("flex-1 rich-text-editor text-body outline-none", className),
+          "data-mc": "content",
+          ...(ariaLabel ? { role: "textbox", "aria-label": ariaLabel, "aria-multiline": "true" } : {}),
         },
       },
     });
+
+    // Catalog queries can settle after the last keystroke. Refresh the active
+    // popup without changing the document, selection or editor instance.
+    useEffect(() => {
+      quickActionMenuListeners.current.forEach((refresh) => refresh());
+    }, [quickActionMenu]);
 
     // Signal hosts that the deferred editor instance now exists. Fired from a
     // passive effect (not `onCreate`) so it runs after the commit in which

@@ -1,7 +1,10 @@
 import {
   hasCompleteAssetSet,
   parseReleaseAssets,
+  parseReleaseAssetSizes,
   type DownloadAssets,
+  type DownloadSizes,
+  type GitHubAsset,
 } from "./parse-release-assets";
 
 /**
@@ -20,7 +23,7 @@ import {
  * asset set is complete — every button on the page then resolves to a
  * real file.
  *
- * On any failure (network, rate limit, malformed payload) returns a
+ * On any failure (network, timeout, rate limit, malformed payload) returns a
  * `null`-shaped result and logs — the page degrades to a "version
  * unavailable" view rather than 500ing.
  */
@@ -31,6 +34,7 @@ export interface LatestRelease {
   htmlUrl: string | null;
   allReleasesUrl: string;
   assets: DownloadAssets;
+  sizes: DownloadSizes;
 }
 
 const DEFAULT_RELEASE_REPOSITORY = "kanfashidoufu/multica";
@@ -43,13 +47,18 @@ const RELEASE_CANDIDATE_COUNT = 5;
 
 const REVALIDATE_SECONDS = 300;
 
+// The homepage hero awaits this on a cold cache, so a GitHub that accepts
+// the connection but never answers would hold the whole page. Past this,
+// the page renders with the empty release instead.
+export const RELEASE_TIMEOUT_MS = 3000;
+
 interface GitHubReleasePayload {
   tag_name?: string;
   published_at?: string;
   html_url?: string;
   prerelease?: boolean;
   draft?: boolean;
-  assets?: Array<{ name: string; browser_download_url: string }>;
+  assets?: GitHubAsset[];
 }
 
 export async function fetchLatestRelease(): Promise<LatestRelease> {
@@ -71,10 +80,16 @@ export async function fetchLatestRelease(): Promise<LatestRelease> {
     headers.Authorization = `Bearer ${token}`;
   }
 
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new Error(`GitHub API timed out after ${RELEASE_TIMEOUT_MS}ms`)),
+    RELEASE_TIMEOUT_MS,
+  );
   try {
     const res = await fetch(releasesApiUrl, {
       next: { revalidate: REVALIDATE_SECONDS },
       headers,
+      signal: controller.signal,
     });
     if (!res.ok) {
       throw new Error(`GitHub API responded ${res.status}`);
@@ -97,10 +112,13 @@ export async function fetchLatestRelease(): Promise<LatestRelease> {
       htmlUrl: chosen.release.html_url ?? null,
       allReleasesUrl,
       assets: chosen.assets,
+      sizes: parseReleaseAssetSizes(chosen.release.assets ?? []),
     };
   } catch (err) {
     console.warn("[download] fetchLatestRelease failed:", err);
     return emptyRelease(allReleasesUrl);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -158,5 +176,6 @@ function emptyRelease(
     htmlUrl: null,
     allReleasesUrl,
     assets: {},
+    sizes: {},
   };
 }

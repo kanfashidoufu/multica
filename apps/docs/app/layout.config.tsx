@@ -1,30 +1,7 @@
 import type { BaseLayoutProps } from "fumadocs-ui/layouts/shared";
-import { ArrowUpRight } from "lucide-react";
-
-// Docs-local stateless Multica mark — matches @multica/ui's MulticaIcon
-// visually (same 8-pointed-asterisk clip-path), but without useState/
-// useEffect so it's safe to render from Server Components such as
-// layout.config.tsx / layout.tsx. Keep in sync with
-// packages/ui/components/common/multica-icon.tsx if the mark changes.
-const MULTICA_CLIP = `polygon(
-  45% 62.1%, 45% 100%, 55% 100%, 55% 62.1%,
-  81.8% 88.9%, 88.9% 81.8%, 62.1% 55%, 100% 55%,
-  100% 45%, 62.1% 45%, 88.9% 18.2%, 81.8% 11.1%,
-  55% 37.9%, 55% 0%, 45% 0%, 45% 37.9%,
-  18.2% 11.1%, 11.1% 18.2%, 37.9% 45%, 0% 45%,
-  0% 55%, 37.9% 55%, 11.1% 81.8%, 18.2% 88.9%
-)`;
-
-function MulticaMark() {
-  return (
-    <span className="inline-block size-[1em]" aria-hidden="true">
-      <span
-        className="block size-full bg-current"
-        style={{ clipPath: MULTICA_CLIP }}
-      />
-    </span>
-  );
-}
+import { ArrowUpRight } from "@multica/ui/icons";
+import { MulticaIcon } from "@multica/ui/components/common/multica-icon";
+import { MulticaWordmark } from "@multica/ui/components/common/multica-wordmark";
 
 function GitHubMark() {
   return (
@@ -52,7 +29,10 @@ const externalLinkText = (label: string) => (
 export const baseOptions: BaseLayoutProps = {
   nav: {
     title: (
-      <span className="font-semibold text-base">Multica Docs</span>
+      <span className="inline-flex items-center gap-2 font-semibold text-base">
+        <MulticaWordmark className="h-4" />
+        Docs
+      </span>
     ),
   },
   links: [
@@ -63,7 +43,7 @@ export const baseOptions: BaseLayoutProps = {
       external: true,
     },
     {
-      icon: <MulticaMark />,
+      icon: <MulticaIcon />,
       text: externalLinkText("Multica"),
       url: "https://multica.ai",
       external: true,
