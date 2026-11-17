@@ -98,9 +98,20 @@ func sourceBranchScopeChanged(before, after []byte) bool {
 	return json.Unmarshal(before, &old) != nil || json.Unmarshal(after, &next) != nil || old != next
 }
 
-// A blocked run has nobody in the foreground to report a changed assignment.
+// A waiting run has nobody in the foreground to report a changed assignment.
 // Make its handoff visible without starting the old agent or moving its PR.
 func branchHandoffNotice(ctx context.Context, q *db.Queries, issue db.Issue) (db.InboxItem, error) {
+	var kind, body string
+	switch issue.Status {
+	case "in_review":
+		kind = "review_requested"
+		body = "Syndra 负责人或版本已变更。请在任务中审核已有修改，确认后按新分支决定继续。"
+	case "blocked":
+		kind = "agent_blocked"
+		body = "Syndra 负责人或版本已变更，原分支等待已停止。请在任务中接手并按当前负责人的分支决定恢复，已有提交和 PR 保留。"
+	default:
+		return db.InboxItem{}, nil
+	}
 	var scope mirroredBranchOwner
 	if err := json.Unmarshal(issue.Metadata, &scope); err != nil {
 		return db.InboxItem{}, err
@@ -111,8 +122,8 @@ func branchHandoffNotice(ctx context.Context, q *db.Queries, issue db.Issue) (db
 	}
 	item, err := q.CreateInboxItem(ctx, db.CreateInboxItemParams{
 		ID: dbid.NewV7(), WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, RecipientType: "member", RecipientID: member.UserID,
-		Type: "agent_blocked", Severity: "action_required", Title: issue.Title,
-		Body:    util.StrToText("Syndra 负责人或版本已变更，原分支等待已停止。请在任务中接手并按当前负责人的分支决定恢复，已有提交和 PR 保留。"),
+		Type: kind, Severity: "action_required", Title: issue.Title,
+		Body:    util.StrToText(body),
 		Details: []byte(`{"reason":"syndra_branch_scope_changed"}`),
 	})
 	if errors.Is(err, pgx.ErrNoRows) {

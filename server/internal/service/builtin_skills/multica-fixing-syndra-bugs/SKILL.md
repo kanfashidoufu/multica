@@ -1,6 +1,6 @@
 ---
 name: multica-fixing-syndra-bugs
-description: "Use for enrolled Syndra bug fixes: resolve the current assignee's personal version branch, resume isolated work, validate and integrate into version/test before review."
+description: "Use for enrolled Syndra bugs: resolve the assignee's version branch, resume isolated fixes, hand off for review, and verify integration into version/test."
 user-invocable: false
 allowed-tools: Bash(multica *), Bash(git *), Bash(gh *), Bash(bash *)
 ---
@@ -83,6 +83,10 @@ the repository's relevant checks. Inspect the final diff for unrelated work and
 secrets. If the root cause or affected repositories change, update the plan and
 branch decisions before expanding the patch.
 
+For enrolled Bug fixes, use ordinary Git commits; skip the QTB local commit
+gate (`qtb-local-commit-gate`) and its receipt. Validation, CI and repository
+branch protection still apply.
+
 Fetch the exact confirmed branch before final testing. Incorporate its changes
 on the task branch, resolve conflicts semantically and rerun affected checks.
 Never blanket-accept ours/theirs or overwrite another bug's work. If rebasing a
@@ -101,7 +105,10 @@ After local validation and required CI pass, merge the validated fix into the
 confirmed version branch, push it, then merge that version branch into remote
 `test` and push it. Resolve conflicts semantically in the isolated integration
 checkout; after a successful resolution notify the current human assignee.
-Required reviews/checks and uncertain conflicts remain technical blockers.
+If the fix is ready and only the assignee's confirmation or PR approval remains,
+set `multica issue status <issue-id> in_review --no-start` now. Mention the
+assignee with the diff/PR, checks, exact decision needed and outstanding merges.
+When confirmed, resume any remaining integration; do not add a routine approval.
 
 If validation or required CI fails, commit the current fix snapshot, merge that
 snapshot into the confirmed version branch and push it, then set the issue to
@@ -119,7 +126,7 @@ bash <this-skill-dir>/scripts/verify-version-delivery.sh \
 
 Only `delivery=merged` with exit status 0 proves the version branch delivery.
 Then run the test-branch verification described in the reference. Both remote
-facts are required before review. Squash/rebase merges must use the resulting
+facts are required before reporting delivery. Squash/rebase merges must use the resulting
 merge commit, not assume the original PR head remains an ancestor. Failed
 fetches, shallow history or a missing merge commit are unverified, not success.
 
@@ -135,11 +142,9 @@ Mention the verified current human as `[@Name](mention://member/<scope.member>)`
 - test merge commit and fetched test tip;
 - tests and CI results, remaining risks and optional verification steps.
 
-Set `in_review` only after both remote integrations are proven, using
-`--no-start` when changing status for work already in progress. Notify the
-current human assignee and ask them to review the merged result; do not claim a
-production deployment occurred. Use the target repository's own setup commands
-if offering a detached review worktree at the test merge commit.
+After both integrations, set or keep `in_review` for final human acceptance.
+Report the merged result to the current assignee. For local verification, offer
+a detached worktree at the test merge commit and the repository's setup commands.
 
 If blocked, keep the issue `blocked`, clearly state that version integration is
 incomplete, and identify the exact missing decision/check/access or conflicting

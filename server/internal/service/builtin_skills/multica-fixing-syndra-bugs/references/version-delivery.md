@@ -158,9 +158,15 @@ appropriate verification; never invent a prior successful check.
 
 ## Review handoff
 
-Only after every required repository has both delivery proofs, set `in_review`
-and report the tuple `(repo, version branch, PR, validated head, version merge
-commit, fetched version tip, test merge commit, fetched test tip)` with tests.
+For a completed patch awaiting only the responsible person's decision, write
+`multica issue status <issue-id> in_review --no-start`, even if a required
+approval precedes a merge. Link the reviewable commit or PR, state what the
+assignee must confirm and which branches still need integration. If a check
+fails or a conflict needs repair, use the blocked handoff instead.
+
+Once every repository has both delivery proofs, report the tuple
+`(repo, version branch, PR, validated head, version merge commit, fetched
+version tip, test merge commit, fetched test tip)` with tests.
 `done` is human acceptance. A source-system
 "resolved" status or a completed agent run is not proof of version integration.
 

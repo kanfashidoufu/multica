@@ -44,13 +44,18 @@ func TestSyndraBranchScopeUsesStructuredMirror(t *testing.T) {
 }
 
 func TestBranchWaitWithdrawalOnSyndraReassignment(t *testing.T) {
+	t.Run("owner confirmation", func(t *testing.T) { testBranchHandoff(t, "in_review", "review_requested") })
+	t.Run("technical blocker", func(t *testing.T) { testBranchHandoff(t, "blocked", "agent_blocked") })
+}
+
+func testBranchHandoff(t *testing.T, status, noticeType string) {
 	ctx := t.Context()
 	pool := openTestPool(t, ctx)
 	q := db.New(pool)
 	fx := createImporterFixture(t, ctx, pool, q)
 	newOwner := createImporterWorkspaceMember(t, ctx, pool, q, fx.Workspace.ID, "新成员", "")
 	f := testutil.New(pool, util.UUIDToString(fx.Workspace.ID), util.UUIDToString(fx.User.ID))
-	bug := f.Issue(t, "waiting", testutil.Cols{"status": "blocked", "metadata": []byte(`{"multica_bug_automation":true,"bug_assignee_name":"王宁","sync_source_env":"prod","bug_version_id":42}`)})
+	bug := f.Issue(t, "waiting", testutil.Cols{"status": status, "metadata": []byte(`{"multica_bug_automation":true,"bug_assignee_name":"王宁","sync_source_env":"prod","bug_version_id":42}`)})
 	f.Cleanup(t, "DELETE FROM inbox_item WHERE issue_id=$1", bug)
 	id, err := util.ParseUUID(bug)
 	if err != nil {
@@ -70,9 +75,12 @@ func TestBranchWaitWithdrawalOnSyndraReassignment(t *testing.T) {
 		name    string
 		enabled int
 	}{{"王宁", 1}, {"新成员", 0}, {"新成员", 0}} {
-		_, _, err := i.updateBugSyncMirror(ctx, issue, "waiting", "source", "todo", "none", map[string]any{"bug_assignee_name": tc.name, "sync_source_env": "prod", "bug_version_id": 42})
+		_, updated, err := i.updateBugSyncMirror(ctx, issue, "waiting", "source", "todo", "none", map[string]any{"bug_assignee_name": tc.name, "sync_source_env": "prod", "bug_version_id": 42})
 		if err != nil {
 			t.Fatal(err)
+		}
+		if updated.Status != status {
+			t.Fatalf("source sync changed %s to %s", status, updated.Status)
 		}
 		if got := f.Count(t, "SELECT count(*) FROM issue_wakeup WHERE id=$1 AND enabled", ours); got != tc.enabled {
 			t.Fatalf("%s: enabled=%d", tc.name, got)
@@ -81,7 +89,7 @@ func TestBranchWaitWithdrawalOnSyndraReassignment(t *testing.T) {
 			t.Fatal("unrelated rule withdrawn")
 		}
 	}
-	if n := f.Count(t, "SELECT count(*) FROM inbox_item WHERE issue_id=$1 AND recipient_id=$2 AND details->>'reason'='syndra_branch_scope_changed'", bug, newOwner.User.ID); n != 1 {
-		t.Fatalf("new owner got %d handoffs", n)
+	if n := f.Count(t, "SELECT count(*) FROM inbox_item WHERE issue_id=$1 AND recipient_id=$2 AND type=$3 AND details->>'reason'='syndra_branch_scope_changed'", bug, newOwner.User.ID, noticeType); n != 1 {
+		t.Fatalf("new owner got %d %s handoffs", n, noticeType)
 	}
 }
