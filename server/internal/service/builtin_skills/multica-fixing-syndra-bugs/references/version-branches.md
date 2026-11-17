@@ -1,71 +1,24 @@
-# Version branch decisions and checkout
+# Personal version branch decisions
 
-## Evidence order
+A default belongs to one **workspace + Syndra source environment + repository + version ID + current human assignee UUID**. The server resolves the unique member from the current synced assignee. Do not use the issue creator, agent ID, suffix preference, or another developer's confirmation as a substitute. An ordinary project ref or a version-wide mapping is only a suggestion.
 
-A target is a tuple: **bug + version + repository URL + exact remote branch**.
-Use the strongest applicable evidence; contradictory current evidence always
-needs human resolution.
-
-1. A current issue-creator reply naming that tuple is authoritative. Reuse a
-   prior confirmation for the same tuple; do not ask again just because the run
-   restarted or a metadata cursor disappeared. A reply saying "yes" is valid
-   only in response to a proposal containing exactly one repo/branch choice.
-2. An explicit maintained project/repository version-to-branch mapping can
-   resolve the tuple automatically when it names this exact bug version and
-   repository, the branch exists remotely, and no current comment overrides or
-   contradicts it. Record the mapping source/text. A resource's `ref` without an
-   explicit connection to the bug version is a checkout default, not a mapping;
-   `default_branch_hint`, a tag/SHA, HEAD and a current environment branch are
-   not release-branch evidence.
-3. Discover candidates by querying the actual remote. Fuzzy name matching
-   supplies options for a person, never an automatic branch decision by count.
+In the verified checkout list live candidates with the bundled helper:
 
 ```bash
 bash <this-skill-dir>/scripts/find-version-branches.sh "<bug_version_name>" "<checkout-path>"
+multica issue syndra-branch <bug-issue-id> --repo "<credential-free-origin-url>" \
+  --candidate "<remote-candidate-1>" --candidate "<remote-candidate-2>"
 ```
 
-The script reads `git ls-remote --heads origin`, not cached remote-tracking refs.
-It prints `version_token`, `match_count`, and `branch` lines. It requires one
-complete dotted version and rejects ambiguous inputs. For `2.91.56`, branches
-such as `release/v2.91.56_wn`, `release/v2.91.56_merge`, and `v2.91.56` are
-candidates. `2.91.560`, `2.91.56.1`, and `12.91.56` are different versions.
-Remote/auth failure is a discovery failure, not zero matches.
+Pass one candidate flag per actual match, or none when there are none. Network failure is not an empty list. A single fuzzy match is still only a proposal. Do not change the workspace/project repo settings.
 
-Never choose between `_wn` and `_merge` by suffix, alphabetic order or activity.
-Missing/malformed version metadata can be resolved by an explicit creator reply
-that supplies the actual version and target tuple; retain that reply as the
-correction source instead of fabricating source metadata.
+- **issue_override / personal_default**: fetch the exact `refs/heads/<branch>` from the verified origin and record its commit. In the Bug thread record the response's marker verbatim on its own line, repo, version, member, branch and decision comment ID. Use the existing per-Bug worktree. A subsequent Bug with the same personal default proceeds without asking.
+- **waiting**: the command finds or creates one shared confirmation issue assigned to the member. For an assigned agent run it also registers a one-time native wakeup for this Bug when the confirmation issue reaches done (check `wakeup_id`). Move the Bug to `blocked --no-start` and leave a link to the confirmation issue plus the marker in the Bug thread. Do not send another branch question; other Bugs in this scope use the same ticket. The member replies **默认 <branch>** on that ticket, or **确认** for its sole proposal; only **更换默认 <branch>** replaces an existing default. The server records their comment and completes the confirmation issue, not the Bug.
+- **Only this Bug**: the member can reply **仅本单 <branch>** directly to the agent's marked comment on the original Bug. This takes precedence for that Bug and repository only. It does not complete the shared confirmation or release any other waiters. Previously confirmed, unambiguously scoped individual replies may still be used for that Bug alone; never promote old replies to a shared default.
+- **Stale target**: a successful remote lookup proving that the personal branch is gone permits repeating the command with `--missing-decision <decision_comment_id>`. Only the caller receiving `reopened=true` posts a replacement request on the shared ticket, mentioning the member and listing fresh candidates. A missing per-Bug override needs a new per-Bug reply. Never invalidate a default because of an authentication or network failure.
+- **Changed assignee/repository/version**: on a wake, before editing, and immediately before either integration, read the current source and run the resolver again. Compare the full scope and decision to the recorded one. Never reuse another member's choice, even for this same Bug. If work/PR already exists, preserve it and report both targets for human handoff; do not automatically retarget. A different agent owner, missing/ambiguous member, missing version ID or environment, unavailable resolver, or failed wakeup registration is a blocker; never guess a shared scope or promise a wakeup without a saved rule.
 
-## Human intervention
-
-When evidence cannot establish a target, post one actionable branch-confirmation
-comment mentioning the creator. Include the issue/bug, version, repository,
-all candidates, and any conflict with project context. Ask for the exact target
-branch (and missing version/repository if needed). One candidate may be proposed
-for explicit confirmation; silence, a reaction, or another user's reply does not
-confirm it. A creator can explicitly select a nonmatching branch, but the reply
-must explain its association with this bug version; verify its existence.
-
-```bash
-multica issue metadata set <issue-id> --key waiting_on --value version_branch_confirmation --type string
-multica issue metadata set <issue-id> --key blocked_reason --value "<repository, version, candidates or discovery error>" --type string
-multica issue status <issue-id> blocked --no-start
-multica issue comment add <issue-id> --content-file <question-file>
-```
-
-Use the runtime's `--parent` when replying. Leave the agent assigned and end the
-run; a member reply can route back through Multica's comment dispatch. Read the
-actual reply actor, not a name quoted in its text. If the required creator is no
-longer a workspace member, leave a human handoff and do not invent a replacement.
-
-The comment/reply is the decision record. `waiting_on` and `blocked_reason` are
-optional search cursors; losing them on Syndra upsert must neither erase an
-existing confirmation nor authorize a missing one. Do not repeat an unanswered
-question unless its candidate set or evidence changed.
-
-After a valid decision, fetch `refs/heads/<branch>` explicitly; verify it is an
-actual remote branch, not a local ref, tag or SHA. Record `FETCH_HEAD` and the
-exact tuple. Clear stale waiting cursors and move to `in_progress --no-start`.
+Keep the source human as the branch decision and review contact. Remote branches with `_wn` or `_merge` are legitimate; do not rank by suffix or recent activity. When a branch has been established and fetched, clear stale waiting metadata and move the Bug to `in_progress --no-start`. Each Bug still starts from the fresh version tip, not the prior Bug's commit or task branch.
 
 ## Checkout and continuation
 

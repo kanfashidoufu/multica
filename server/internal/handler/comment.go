@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/externalissue"
 	"github.com/multica-ai/multica/server/internal/logger"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/service"
@@ -1857,6 +1858,22 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 		SuppressedAgentIds: suppressAgentIDs,
 	}
 	var created db.CreateCommentRow
+	var confirmedTicket db.Issue
+	var cancelledTicketTasks []db.AgentTaskQueue
+	insertComment := func(q *db.Queries) (db.CreateCommentRow, error) {
+		row, err := q.CreateComment(r.Context(), createParams)
+		if err == nil && authorType == "member" && issue.OriginType.String == externalissue.OriginType {
+			ticket, changed, applyErr := externalissue.ApplyBranchReply(r.Context(), q, issue, row.Comment())
+			if applyErr != nil {
+				return row, applyErr
+			}
+			if changed {
+				confirmedTicket = ticket
+				cancelledTicketTasks, err = service.StopClosedIssueWakeups(r.Context(), q, ticket)
+			}
+		}
+		return row, err
+	}
 	var err error
 	if len(attachmentIDs) > 0 {
 		// A comment and the attachments it was posted with are one visible
@@ -1887,7 +1904,7 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 			AttachmentIds: attachmentIDs,
 		})
 		if err == nil {
-			created, err = qtx.CreateComment(r.Context(), createParams)
+			created, err = insertComment(qtx)
 		}
 		if err == nil {
 			var missing pgtype.UUID
@@ -1909,9 +1926,11 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 			err = tx.Commit(r.Context())
 		}
 	} else {
-		created, err = wakeupWrite(h, r, func(q *db.Queries) (db.CreateCommentRow, error) {
-			return q.CreateComment(r.Context(), createParams)
-		})
+		created, err = wakeupWrite(h, r, insertComment)
+	}
+	if errors.Is(err, externalissue.ErrBranchInput) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		// The issue was deleted, possibly while this waited for its row lock.
@@ -1938,6 +1957,12 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 		"issue_status":        issue.Status,
 		"issue_revision":      created.IssueRevision,
 	})
+	if confirmedTicket.ID.Valid {
+		h.publishIssueSnapshots(r.Context(), []db.Issue{confirmedTicket}, authorType, authorID)
+		if len(cancelledTicketTasks) > 0 {
+			h.TaskService.BroadcastCancelledTasks(r.Context(), uuidToString(issue.WorkspaceID), cancelledTicketTasks)
+		}
+	}
 
 	// A reply in a resolved thread re-opens it. Done after CreateComment commits
 	// so the reply is visible regardless of the unresolve outcome. Shared with

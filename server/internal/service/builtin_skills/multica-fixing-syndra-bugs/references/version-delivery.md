@@ -56,7 +56,7 @@ such evidence. Local checks remain required.
 
 ## Merge into the version branch
 
-Re-read the creator's branch decision and the current issue version. Verify that
+Re-resolve the current assignee's branch decision and the current issue version. Verify that
 this PR's repository/base still matches, its current head equals the tested
 head, required checks/reviews passed, and merging is allowed. Then merge with
 the repository's allowed strategy, binding the request to that head:

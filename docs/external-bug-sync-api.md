@@ -46,7 +46,7 @@ Multica 当前支持 `syndra.multica.version_bug.webhook.v1` 结构，按 `items
 | `items[].status/status_name` | 普通任务映射为 Multica issue 状态；已进入自动化的任务保留本地交付状态，源状态继续写入 metadata |
 | `items[].bug_level/priority` | 映射为 Multica issue 优先级 |
 | `items[].bug_type_id/bug_type` | 写入 issue metadata |
-| `items[].creator/owner/assignee/solver` | 写入 issue metadata；创建 issue 时使用 `assignee.name` 精确匹配 Bug 工作区中的唯一 Multica 用户，并把该用户作为 assignee 和 creator；也兼容 `bug_detail.assignee.name`。负责人名称缺失、匹配不到或不唯一时，统一回退到 Bug 工作区的 owner（工作区创建人）；不使用 `mate_id`，也不读取默认指派人环境变量。试运行期间，仅当推送负责人被精确解析为王宁时，才继续尝试转交给其唯一可执行的个人智能体 |
+| `items[].creator/owner/assignee/solver` | 写入 issue metadata；创建 issue 时使用 `assignee.name` 精确匹配 Bug 工作区中的唯一 Multica 用户，并把该用户作为 assignee 和 creator；也兼容 `bug_detail.assignee.name`。负责人名称缺失、匹配不到或不唯一时，统一回退到 Bug 工作区的 owner（工作区创建人）；不使用 `mate_id`，也不读取默认指派人环境变量。试运行期间，仅当推送负责人唯一匹配试运行名单成员时，才继续尝试转交给其唯一可执行的个人智能体 |
 | `items[].module` | 写入 issue metadata |
 | `items[].resolve_solution/resolve_solution_name` | 写入 issue metadata |
 | `items[].attachments/videos` | 当前记录数量到 metadata，暂不下载并绑定 Multica attachment |
@@ -96,8 +96,8 @@ Multica 当前状态和内部标记，避免源系统的 `resolved` 把未合入
 
 分支与交付流程由内置 `multica-fixing-syndra-bugs` skill 和两个校验脚本承接：
 
-- 以“Bug、版本、仓库、远端分支”为一组确认信息。当前创建人的有效回复，或明确关联该版本和仓库的项目映射，可以复用；普通项目 `ref`、默认分支提示和环境分支不能作为依据。
-- 模糊匹配只列候选。即使只有一个候选，没有确定证据也必须请当前人工指派人确认。多候选、缺失版本、信息冲突、远端不可访问或分支不存在均进入 `blocked`。
+- 先读本单例外，再读当前人工指派人的个人默认分支；按工作区、来源环境、仓库、版本 ID、成员 UUID 隔离。首次缺少默认值时共用一张确认单；本人回复后，等待该确认单的 Bug 通过原有任务队列恢复。项目映射或分支后缀不能替代个人选择。变更负责人后重新解析，有在途修改时保留原 PR 交接。
+- 模糊匹配只列候选。已有有效个人选择时，即使匹配到多个分支也直接使用本人选定的分支。没有决定时才等待确认；缺失版本、信息冲突或分支不可验证时保持阻塞。
 - 读取最新远端分支，完整区分 `2.91.56`、`2.91.560`、`2.91.56.1`；不按 `_wn`、`_merge` 后缀猜测发布目标。
 - 复用托管 checkout 或 `local_directory.execution_mode=worktree`。每个受影响仓库使用独立修复分支和 PR，恢复运行时先读取已有讨论、分支和 PR，保护前轮工作。
 - 验证通过后按仓库规则合并并推送确认的版本分支，再把版本分支合入远端 `test` 并推送。GitHub 使用已验证 head 约束合并请求；进入队列或启用自动合并不算完成。脚本核对真实 merged 状态、PR base/head，并确认最新远端版本分支包含合并提交；`test` 还必须有独立的合并提交和远端包含性证据。其他 forge 必须取得同等证据。
@@ -105,7 +105,7 @@ Multica 当前状态和内部标记，避免源系统的 `resolved` 把未合入
 - 所有受影响仓库都完成合入后，才交给创建人 review，任务进入 `in_review`。PR 使用标题关联任务，不设置可能提前自动关闭任务的 `Fixes/Closes/Resolves`；`done` 由人工验收。
 
 `waiting_on` / `blocked_reason` 仅作临时检索游标，后续同步可能覆盖它们。
-分支决定保存在评论中，恢复时读取历史证据，不因游标丢失重复询问，也不据此猜测授权。
+个人默认值以共享确认单及本人回复为准，原 Bug 评论只保存本单例外。部署时须同步升级服务端与执行端 CLI；缺少分支命令时保持阻塞，不回退到其他人的确认。
 CI 或合并队列尚未完成时明确保留阻塞并给出恢复动作；当前流程不创建额外定时任务，
 也不假设任务退出后会自动被 CI 完成事件唤醒。
 

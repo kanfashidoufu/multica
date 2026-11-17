@@ -1483,8 +1483,12 @@ func bugIssueMetadata(payload BugSyncPayload, item BugSyncItem, provider, record
 	b.add("bug_external_key", item.ExternalKey)
 	b.add("bug_entity_type", item.EntityType)
 	b.add("bug_event", item.Event)
-	b.add("bug_version_id", item.VersionID)
-	b.add("bug_version_name", item.VersionName)
+	versionID := item.VersionID
+	if versionID == 0 {
+		versionID = item.BugDetail.Version.VersionID
+	}
+	b.add("bug_version_id", versionID)
+	b.add("bug_version_name", firstNonEmpty(item.VersionName, item.BugDetail.Version.VersionName))
 	b.add("bug_demand_name", item.DemandName)
 	b.add("bug_role", item.Role)
 	b.add("bug_level", item.BugLevel)
@@ -1510,10 +1514,15 @@ func bugIssueMetadata(payload BugSyncPayload, item BugSyncItem, provider, record
 	b.add("bug_version_status", item.BugDetail.Version.VersionStatus)
 	b.addPerson("bug_owner", item.Owner)
 	b.addPerson("bug_creator", item.Creator)
-	b.addPerson("bug_assignee", item.Assignee)
+	b.addPerson("bug_assignee", bugAssigneePerson(item))
 	b.addPerson("bug_solver", item.Solver)
 	for key, value := range item.Metadata {
-		b.add(sanitizeBugMetadataKey(key), value)
+		key = sanitizeBugMetadataKey(key)
+		switch key {
+		case "external_source", "sync_source_env", "bug_version_id", "bug_version_name", "bug_assignee_name":
+			continue // Personal branch scope comes from the webhook's structured fields.
+		}
+		b.add(key, value)
 	}
 	return b.out
 }

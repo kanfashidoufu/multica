@@ -1,6 +1,6 @@
 ---
 name: multica-fixing-syndra-bugs
-description: "Use for code-changing Syndra bugs enrolled in the 王宁 pilot (external_source=syndra, multica_bug_automation=true), including version-branch confirmation, resumed fixes, validation-gated version/test integration and review handoff."
+description: "Use for enrolled Syndra bug fixes: resolve the current assignee's personal version branch, resume isolated work, validate and integrate into version/test before review."
 user-invocable: false
 allowed-tools: Bash(multica *), Bash(git *), Bash(gh *), Bash(bash *)
 ---
@@ -9,7 +9,7 @@ allowed-tools: Bash(multica *), Bash(git *), Bash(gh *), Bash(bash *)
 
 The acceptance criteria are validation, CI, merge into the confirmed version
 branch, promotion to remote `test`, and review notification. A PR or auto-merge
-setting alone is incomplete. Keep the original member creator as branch
+setting alone is incomplete. Use the current Syndra assignee as branch
 decision and review contact; respect Agent Identity limits.
 
 Read `multica-platform/references/issues.md`, `projects.md`, and `mentions.md`
@@ -20,12 +20,10 @@ sibling `multica-platform` skill's `references/` directory.
 
 Read the current issue and its relevant comment threads using the runtime's
 commands. Confirm `external_source=syndra`, `multica_bug_automation=true`, and
-`creator_type=member`. The importer controls the pilot assignee allowlist via
-`MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES`; do not infer eligibility from this
-skill or hardcode a person's name. Resolve `creator_id` against `member.user_id`
-from `multica workspace member list --output json`, not a membership row ID. If
-the automation marker is absent or assignment changed away from the configured
-pilot member, stop automation and explain the handoff.
+`creator_type=member`. Use the branch resolver's current member UUID, verified
+against the workspace roster. The importer controls pilot enrollment; the
+creator may no longer be the assignee. Stop if the current agent is no longer
+the member's agent. Confirmation issues themselves are not enrolled Bugs.
 
 Use the actual `bug_id`, `bug_version_id`, `bug_version_name`, environment,
 reproduction steps and source evidence. An environment branch (`dev`, `test`,
@@ -51,10 +49,10 @@ selection rules, human confirmation and safe checkout procedure. Finish that
 procedure before editing product code. Record the repository URL, bug/version
 identity, exact remote branch, evidence source, and fetched base SHA in a comment.
 
-A single fuzzy match is only a candidate. Zero/multiple matches, inconsistent
-version evidence, missing branches, or unavailable remote state require human
-intervention. Never substitute the default branch, a test environment branch,
-or a nearby version to keep the run moving.
+A valid personal decision selects the exact remote branch even if many other
+branches match. Without a valid decision, fuzzy matches are proposals only.
+Stop for conflicting evidence or an unverifiable target; never substitute an
+environment, default or nearby branch.
 
 On resume and immediately before merge, re-read the issue/version and the branch
 decision. A change to the repository, bug version, or decision invalidates the
@@ -129,7 +127,7 @@ fetches, shallow history or a missing merge commit are unverified, not success.
 
 After every affected repo has proof, post one result in the appropriate comment
 thread with `--content-file` and the runtime-provided `--parent` when applicable.
-Mention the verified creator as `[@Name](mention://member/<creator_id>)`. Include:
+Mention the verified current human as `[@Name](mention://member/<scope.member>)`. Include:
 
 - bug root cause and minimal change;
 - each repository, confirmed version branch and decision evidence;

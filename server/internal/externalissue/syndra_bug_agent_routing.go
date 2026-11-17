@@ -24,7 +24,7 @@ const bugAutomationPilotAssignee = "王宁"
 
 const bugAutomationMetadataKey = "multica_bug_automation"
 
-const bugAutomationAcceptance = "\n\n自动化验收：使用 multica-fixing-syndra-bugs skill。先确认每个仓库对应的版本分支；无法确认时请当前人工指派人确认。验证通过后必须取得本地验证及 CI 结果，将修复合入已确认的版本分支并推送远端，再将该版本分支合入 test 并推送远端；冲突解决后通知当前人工指派人。验证失败时提交当前修复快照到版本分支并 block 任务，通知当前人工指派人介入。仅创建 PR、进入合并队列或发布测试环境均不算完成。"
+const bugAutomationAcceptance = "\n\n自动化验收：使用 multica-fixing-syndra-bugs skill。按当前 Syndra 人工指派人、仓库和版本解析分支：本单例外优先，否则复用本人的默认分支；未确认时共用一张分支确认单。验证通过后必须取得本地验证及 CI 结果，将修复合入已确认的版本分支并推送远端，再将该版本分支合入 test 并推送远端；冲突解决后通知当前人工指派人。验证失败时提交当前修复快照到版本分支并 block 任务，通知当前人工指派人介入。仅创建 PR、进入合并队列或发布测试环境均不算完成。"
 
 // Keep the pilot's delivery state local: an upstream 'resolved' event is not
 // proof that its fix reached the release branch. Other imports keep mirroring.
@@ -70,8 +70,26 @@ func (i *Importer) updateBugSyncMirror(ctx context.Context, existing db.Issue, t
 	if err != nil {
 		return current, db.Issue{}, err
 	}
+	var cancelled []db.AgentTaskQueue
+	var handoff db.InboxItem
+	if bugAutomationEnrolled(current.Metadata) && sourceBranchScopeChanged(current.Metadata, encoded) {
+		cancelled, err = cancelBranchWaits(ctx, tx, current, "")
+		if err != nil {
+			return current, db.Issue{}, err
+		}
+		if current.Status == "blocked" {
+			handoff, err = branchHandoffNotice(ctx, q, updated)
+			if err != nil {
+				return current, db.Issue{}, err
+			}
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return current, db.Issue{}, err
+	}
+	i.publishBranchWaitCancellation(ctx, current, cancelled)
+	if handoff.ID.Valid {
+		i.publishInboxNew(handoff, updated.Status)
 	}
 	return current, updated, nil
 }
