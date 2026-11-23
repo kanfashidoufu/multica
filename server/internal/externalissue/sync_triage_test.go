@@ -24,22 +24,32 @@ func TestExternalSyncReturnsPreservedTriageState(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			id := dbfx.Issue(t, "Before sync", testutil.Cols{
-				"triage_state":  state,
-				"origin_type":   "external_issue",
-				"assignee_type": "member",
-				"assignee_id":   fx.User.ID,
+				"description_revision": 10,
+				"triage_state":         state,
+				"origin_type":          "external_issue",
+				"assignee_type":        "member",
+				"assignee_id":          fx.User.ID,
 			})
 			issueID, err := util.ParseUUID(id)
 			if err != nil {
 				t.Fatal(err)
 			}
-			updated, err := q.UpdateIssueFromExternalSync(ctx, db.UpdateIssueFromExternalSyncParams{
+			params := db.UpdateIssueFromExternalSyncParams{
 				ID: issueID, WorkspaceID: fx.Workspace.ID,
 				Title: "After sync", Description: util.StrToText("Synced description"),
 				Status: "todo", Priority: "high", Metadata: []byte("{}"),
-			})
+			}
+			updated, err := q.UpdateIssueFromExternalSync(ctx, params)
 			if err != nil {
 				t.Fatalf("UpdateIssueFromExternalSync: %v", err)
+			}
+			if updated.DescriptionRevision != 11 {
+				t.Fatalf("changed description revision = %d, want 11", updated.DescriptionRevision)
+			}
+			params.Title = "Title-only sync"
+			replayed, err := q.UpdateIssueFromExternalSync(ctx, params)
+			if err != nil || replayed.DescriptionRevision != updated.DescriptionRevision {
+				t.Fatalf("title-only sync revision = %d, want %d (err %v)", replayed.DescriptionRevision, updated.DescriptionRevision, err)
 			}
 			stored, err := q.GetIssue(ctx, issueID)
 			if err != nil {

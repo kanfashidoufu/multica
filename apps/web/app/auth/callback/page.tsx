@@ -41,6 +41,8 @@ function CallbackContent() {
   const loginWithLark = useAuthStore((s) => s.loginWithLark);
   const [error, setError] = useState<CallbackError | null>(null);
   const [desktopToken, setDesktopToken] = useState<string | null>(null);
+  // Single-use OAuth codes must only be exchanged once even if React StrictMode
+  // re-invokes mount effects in development.
   const exchangedCodeRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -65,7 +67,6 @@ function CallbackContent() {
     const stateParts = state.split(",");
     const provider = searchParams.get("provider") === "lark" ? "lark" : "google";
     const exchangeKey = `${provider}:${code}`;
-    // OAuth codes are single-use, including when React replays this effect.
     if (exchangedCodeRef.current === exchangeKey) return;
     exchangedCodeRef.current = exchangeKey;
     const isDesktop = stateParts.includes("platform:desktop");

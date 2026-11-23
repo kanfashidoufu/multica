@@ -93,6 +93,13 @@ func newOwnerDaemonRequest(method, path string, body any) *http.Request {
 	return newRequest(method, path, body)
 }
 
+// A real daemon heartbeats before polling. The package-wide fixture can be
+// older than the claim freshness window when the full integration suite runs.
+func refreshClaimRuntime(t *testing.T, runtimeID string) {
+	t.Helper()
+	dbfx.Exec(t, `UPDATE agent_runtime SET status = 'online', last_seen_at = now() WHERE id = $1`, runtimeID)
+}
+
 func newDaemonTokenRequest(method, path string, body any, workspaceID, daemonID string) *http.Request {
 	var buf bytes.Buffer
 	if body != nil {
@@ -797,6 +804,7 @@ func TestDaemonRegister_RecordsRuntimeProfileRegistrationFailure(t *testing.T) {
 	}
 	ctx := context.Background()
 	profileID := insertRuntimeProfileFixture(t, ctx, "Missing Custom Codex", "codex", "missing-codex")
+	dbfx.Exec(t, `UPDATE runtime_profile SET daemon_id = $1 WHERE id = $2`, "test-daemon-profile-failure", profileID)
 
 	req := newOwnerDaemonRequest("POST", "/api/daemon/register", map[string]any{
 		"workspace_id": testWorkspaceID,
@@ -920,7 +928,7 @@ func TestHandleDaemonWSHeartbeat_RuntimeGoneReturnsAckNotError(t *testing.T) {
 				missingRuntime: daemonws.NewRuntimeLease(testWorkspaceID, "online", time.Now().Add(-2*runtimeHeartbeatDBFlushInterval), true),
 			},
 		},
-		missingRuntime, false)
+		missingRuntime, protocol.DaemonHeartbeatRequestPayload{})
 	if err != nil {
 		t.Fatalf("HandleDaemonWSHeartbeat: unexpected error %v", err)
 	}
@@ -964,7 +972,7 @@ func TestHandleDaemonWSHeartbeat_AllowsAnyAuthorizedWorkspace(t *testing.T) {
 				runtimeID: daemonws.NewRuntimeLease(workspaceID, "online", time.Now(), true),
 			},
 		},
-		runtimeID, false)
+		runtimeID, protocol.DaemonHeartbeatRequestPayload{})
 	if err != nil {
 		t.Fatalf("HandleDaemonWSHeartbeat: unexpected error %v", err)
 	}
@@ -2152,6 +2160,7 @@ func TestClaimTask_ProjectGithubReposOverrideWorkspaceRepos(t *testing.T) {
 		"issue_id":   issueID,
 	})
 
+	refreshClaimRuntime(t, runtimeID)
 	req := newOwnerDaemonRequest("POST", "/api/daemon/runtimes/"+runtimeID+"/claim", nil)
 	req = withURLParam(req, "runtimeId", runtimeID)
 	w := testutil.Call(t, testHandler.ClaimTaskByRuntime, req).Want(http.StatusOK)
@@ -2218,6 +2227,7 @@ func TestClaimTask_ProjectDescriptionInjected(t *testing.T) {
 		"issue_id":   issueID,
 	})
 
+	refreshClaimRuntime(t, runtimeID)
 	req := newOwnerDaemonRequest("POST", "/api/daemon/runtimes/"+runtimeID+"/claim", nil)
 	req = withURLParam(req, "runtimeId", runtimeID)
 	w := testutil.Call(t, testHandler.ClaimTaskByRuntime, req).Want(http.StatusOK)
@@ -2307,6 +2317,7 @@ func TestClaimTask_ProjectWithoutRepos_FallsBackToWorkspaceRepos(t *testing.T) {
 		"issue_id":   issueID,
 	})
 
+	refreshClaimRuntime(t, runtimeID)
 	req := newOwnerDaemonRequest("POST", "/api/daemon/runtimes/"+runtimeID+"/claim", nil)
 	req = withURLParam(req, "runtimeId", runtimeID)
 	w := testutil.Call(t, testHandler.ClaimTaskByRuntime, req).Want(http.StatusOK)
@@ -2387,6 +2398,7 @@ func TestClaimTask_AutopilotRunOnly_PopulatesWorkspaceAndProjectContext(t *testi
 	defer testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
 
 	w := httptest.NewRecorder()
+	refreshClaimRuntime(t, runtimeID)
 	req := newOwnerDaemonRequest("POST", "/api/daemon/runtimes/"+runtimeID+"/claim", nil)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("runtimeId", runtimeID)
@@ -2507,6 +2519,7 @@ func TestClaimTaskByRuntime_TaskWorkspaceMismatch_CancelsAndRejects(t *testing.T
 	})
 
 	w := httptest.NewRecorder()
+	refreshClaimRuntime(t, localRuntimeID)
 	req := newOwnerDaemonRequest("POST", "/api/daemon/runtimes/"+localRuntimeID+"/claim", nil)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("runtimeId", localRuntimeID)
@@ -3410,6 +3423,43 @@ func TestClaimTask_ChatAutoRetryFreshSessionReusesParentWorkdir(t *testing.T) {
 	}
 	if !task.PriorSessionResumeUnavailable {
 		t.Fatal("chat auto-retry must disclose that the failed attempt's context did not come back")
+	}
+}
+
+// TestClaimTask_AutoRetryAfterRuntimeMoveStartsNewSession: the agent moved to
+// another runtime while the parent ran there, so the retry is created on the
+// agent's new runtime (#10717). Its claim there must not resume the session the
+// old runtime recorded; the workdir is still offered best-effort, as for any
+// cross-runtime prior (TestClaimTask_IssuePriorSessionRuntimeGuard).
+func TestClaimTask_AutoRetryAfterRuntimeMoveStartsNewSession(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+
+	agentID, runtimeID, daemonID := createRuntimeGuardAgent(t, ctx)
+	oldRuntimeID := createRuntimeGuardRuntime(t, ctx, "opencode")
+	issueID := dbfx.Issue(t, "auto-retry after runtime move fixture", testutil.Cols{"status": "in_progress"})
+	parentID := dbfx.Task(t, agentID, testutil.Cols{
+		"runtime_id":     oldRuntimeID,
+		"issue_id":       issueID,
+		"status":         "failed",
+		"failure_reason": "timeout",
+		"started_at":     testutil.Raw("now() - interval '20 minutes'"),
+		"completed_at":   testutil.Raw("now() - interval '1 minute'"),
+		"session_id":     "old-runtime-session",
+		"work_dir":       "/tmp/old-runtime-workdir",
+		"attempt":        1,
+		"max_attempts":   2,
+	})
+	createAutoRetryForTest(t, ctx, parentID)
+
+	task := claimTaskForRuntimeGuard(t, runtimeID, daemonID)
+	if task.PriorSessionID != "" {
+		t.Fatalf("PriorSessionID = %q, want empty (the old runtime's session cannot resume here)", task.PriorSessionID)
+	}
+	if task.PriorWorkDir != "/tmp/old-runtime-workdir" {
+		t.Fatalf("PriorWorkDir = %q, want the parent's /tmp/old-runtime-workdir offered best-effort", task.PriorWorkDir)
 	}
 }
 
@@ -4959,7 +5009,7 @@ func TestDaemonRegister_ProfileUsesStoredRuntimeIdentity(t *testing.T) {
 	}
 	ctx := context.Background()
 	profileID := insertRuntimeProfileFixture(t, ctx, "Custom OMP", "pi", "wrapper")
-	if _, err := testPool.Exec(ctx, `UPDATE runtime_profile SET runtime_type = 'omp' WHERE id = $1`, profileID); err != nil {
+	if _, err := testPool.Exec(ctx, `UPDATE runtime_profile SET runtime_type = 'omp', daemon_id = 'test-omp-profile' WHERE id = $1`, profileID); err != nil {
 		t.Fatal(err)
 	}
 	req := newOwnerDaemonRequest("POST", "/api/daemon/register", map[string]any{

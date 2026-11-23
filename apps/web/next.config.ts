@@ -54,7 +54,17 @@ const uniqueAllowedDevOrigins = [...new Set(allowedDevOrigins)];
 
 const nextConfig: NextConfig = {
   ...(process.env.STANDALONE === "true" ? { output: "standalone" as const } : {}),
-  transpilePackages: ["@multica/core", "@multica/ui", "@multica/views"],
+  // Otherwise `next dev` writes a generic apps/web/AGENTS.md; agent guidance
+  // lives in the root AGENTS.md.
+  agentRules: false,
+  transpilePackages: ["@multica/core", "@multica/ui", "@multica/views", "@multica/ee"],
+  experimental: {
+    // Workspace pages are client components over TanStack Query, so a route's
+    // RSC payload is the same on every visit. Reusing a visited or prefetched
+    // one for 30s lets a click (an Inbox notification, back to an issue just
+    // read) render without a server round trip first (MUL-9538).
+    staleTimes: { dynamic: 30 },
+  },
   ...(uniqueAllowedDevOrigins.length > 0
     ? { allowedDevOrigins: uniqueAllowedDevOrigins }
     : {}),
@@ -95,6 +105,10 @@ const nextConfig: NextConfig = {
             {
               source: "/ws",
               destination: `${remoteApiUrl}/ws`,
+            },
+            {
+              source: "/collab",
+              destination: `${remoteApiUrl}/collab`,
             },
             {
               source: "/health",

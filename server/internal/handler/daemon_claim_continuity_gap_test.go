@@ -20,6 +20,7 @@ type claimContinuityGapProbe struct {
 
 func claimOneTaskForRuntime(t *testing.T, runtimeID, daemonID string) claimContinuityGapProbe {
 	t.Helper()
+	refreshClaimRuntime(t, runtimeID)
 	w := httptest.NewRecorder()
 	req := newOwnerDaemonRequest(http.MethodPost, "/api/daemon/runtimes/"+runtimeID+"/claim", nil)
 	req = withURLParam(req, "runtimeId", runtimeID)

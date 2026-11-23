@@ -2,6 +2,8 @@ import { useSyncExternalStore } from "react";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import { defaultStorage } from "../platform/storage";
+import { findTheme } from "./installed-themes";
+import { THEME_ID_PATTERN, themeCss } from "./theme-package";
 import { DEFAULT_THEME_ID, findBuiltInTheme } from "./built-in-themes";
 import { isLocalFont, localFontFamily, type LocalFont } from "./local-fonts";
 import {
@@ -14,9 +16,17 @@ import {
 
 export * from "./themes";
 export * from "./built-in-themes";
+export * from "./theme-css";
+export * from "./theme-package";
+export * from "./installed-themes";
 export * from "./anchors";
 export * from "./theme-variables";
+export * from "./palette";
+export * from "./embed-tokens";
 export * from "./local-fonts";
+export * from "./theme-archive";
+export * from "./theme-export";
+export * from "./safe-mode";
 
 /**
  * Appearance sits on top of light/dark mode: a theme (see ./themes) with its
@@ -48,7 +58,7 @@ export const FONT_SIZES = [12, 13, 14, 15, 16] as const;
 export type FontSize = (typeof FONT_SIZES)[number];
 export const DEFAULT_FONT_SIZE: FontSize = 14;
 
-export const CONTENT_SIZES = [13, 14, 15, 16, 17, 18] as const;
+export const CONTENT_SIZES = [12, 13, 14, 15, 16, 17, 18] as const;
 export type ContentSize = typeof FOLLOW_UI | (typeof CONTENT_SIZES)[number];
 
 export const CONTENT_LEADINGS = ["compact", "default", "relaxed"] as const;
@@ -118,7 +128,7 @@ function sanitizeThemeOptions(value: unknown): Record<string, ThemeOptionValues>
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const out: Record<string, ThemeOptionValues> = {};
   for (const [themeId, options] of Object.entries(value).slice(0, 40)) {
-    if (!findBuiltInTheme(themeId) || !options || typeof options !== "object") continue;
+    if (!THEME_ID_PATTERN.test(themeId) || !options || typeof options !== "object") continue;
     const clean: Record<string, ThemeOptionValue> = {};
     for (const [key, v] of Object.entries(options).slice(0, 24)) {
       const value = sanitizeOptionValue(v);
@@ -147,7 +157,7 @@ export function sanitizeAppearance(stored: unknown): AppearancePreferences {
   return {
     theme: pick(
       "theme",
-      (v): v is string => typeof v === "string" && findBuiltInTheme(v) !== undefined,
+      (v): v is string => typeof v === "string" && THEME_ID_PATTERN.test(v),
       p.theme ?? p.style,
     ),
     themeOptions: sanitizeThemeOptions(p.themeOptions),
@@ -201,11 +211,24 @@ const CODE_FONT_FAMILIES: Record<CodeFont, string | null> = {
   jetbrains: "var(--font-code-jetbrains), var(--font-ui-mono), ui-monospace, monospace",
   system: 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
 };
-const ROW_HEIGHTS: Record<Density, string | null> = {
-  compact: "32px",
-  default: null,
-  comfortable: "42px",
-};
+/** What each density sets; Default leaves the theme's or the stylesheet's values. */
+const DENSITY_VARIABLES = {
+  "--issue-row-height": ["32px", "42px"],
+  "--issue-group-header-height": ["2.25rem", "2.75rem"],
+  "--board-card-padding-y": ["0.5rem", "1rem"],
+  "--board-card-gap": ["0.375rem", "0.75rem"],
+  "--nav-item-height": ["1.75rem", "2.25rem"],
+  "--nav-item-padding-y": ["0.25rem", "0.5rem"],
+} as const satisfies Record<string, readonly [compact: string, comfortable: string]>;
+
+function densityVariables(density: Density): Record<string, string | null> {
+  return Object.fromEntries(
+    Object.entries(DENSITY_VARIABLES).map(([name, [compact, comfortable]]) => [
+      name,
+      density === "compact" ? compact : density === "comfortable" ? comfortable : null,
+    ]),
+  );
+}
 const LEADINGS: Record<ContentLeading, [string, string] | null> = {
   compact: ["1.5", "1.65"],
   default: null,
@@ -234,13 +257,15 @@ export function appearanceRootVariables(
     "--content-scale": prefs.contentSize === FOLLOW_UI ? null : String(prefs.contentSize / 14),
     "--content-leading": leading?.[0] ?? null,
     "--content-leading-cjk": leading?.[1] ?? null,
-    "--issue-row-height": ROW_HEIGHTS[prefs.density],
+    ...densityVariables(prefs.density),
   };
 }
 
-/** The theme to render: the chosen one, or Default when it is not a built-in theme. */
-export function activeTheme(prefs: Pick<AppearancePreferences, "theme">): Theme {
-  return findBuiltInTheme(prefs.theme) ?? findBuiltInTheme(DEFAULT_THEME_ID)!;
+/** The theme to render: the chosen one, or Default in safe mode or when it is not installed. */
+export function activeTheme(prefs: Pick<AppearancePreferences, "theme">, safeMode = false): Theme {
+  const fallback = findBuiltInTheme(DEFAULT_THEME_ID)!;
+  if (safeMode) return fallback;
+  return findTheme(prefs.theme) ?? fallback;
 }
 
 const BOTH_MODES = ":root:not(.dark), :root.dark";
@@ -276,9 +301,9 @@ export function appearanceStylesheet(theme: Theme, prefs: AppearancePreferences)
   return parts.filter(Boolean).join("\n");
 }
 
-/** The theme's own CSS. */
+/** The theme's own CSS, checked and with assets resolved. */
 export function appearanceThemeCss(theme: Theme): string {
-  return theme.css ?? "";
+  return themeCss(theme);
 }
 
 /** Attributes for <html>: `data-theme` and the theme's options; `null` removes one. */

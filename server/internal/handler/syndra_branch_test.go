@@ -119,7 +119,19 @@ func TestSyndraPersonalBranchesAndWaiters(t *testing.T) {
 	if v := read(testUserID, a, ta, ""); v.State != "waiting" {
 		t.Fatal("another member chose the default")
 	}
-	comment(testUserID, first.Ticket, "确认", "")
+	decisionKey := newCommentIdempotencyKey(t)
+	postDecision := func(want int) string {
+		t.Helper()
+		req := idempotentCommentRequest(first.Ticket, decisionKey, map[string]any{"content": "确认"})
+		req.Header.Set("X-Workspace-ID", ws)
+		var reply CommentResponse
+		testutil.Call(t, testHandler.CreateComment, req).Want(want).JSON(&reply)
+		return reply.ID
+	}
+	firstReply := postDecision(http.StatusCreated)
+	if replay := postDecision(http.StatusOK); firstReply == "" || replay != firstReply {
+		t.Fatalf("replayed branch decision = %q, want original reply %q", replay, firstReply)
+	}
 	got := read(testUserID, b, tb, "")
 	if got.State != "personal_default" || got.Branch != "v3_wn" || got.Reply == "" {
 		t.Fatalf("did not reuse first bug's default: %+v", got)
