@@ -88,9 +88,12 @@ func (i *Importer) publishBranchWaitCancellation(ctx context.Context, issue db.I
 }
 
 type mirroredBranchOwner struct {
-	Name    string `json:"bug_assignee_name"`
-	Env     string `json:"sync_source_env"`
-	Version int64  `json:"bug_version_id"`
+	Schema         string `json:"sync_schema_version"`
+	SyndraUserID   string `json:"bug_assignee_syndra_user_id"`
+	VerifiedMember string `json:"bug_verified_member_id"`
+	Name           string `json:"bug_assignee_name"`
+	Env            string `json:"sync_source_env"`
+	Version        int64  `json:"bug_version_id"`
 }
 
 func sourceBranchScopeChanged(before, after []byte) bool {
@@ -187,7 +190,7 @@ func (i *Importer) BranchScope(ctx context.Context, issue db.Issue, repo string)
 	if err != nil {
 		return BranchScope{}, err
 	}
-	if !ok {
+	if !ok || (m.Schema == syndraBugV2 && (m.VerifiedMember != util.UUIDToString(person.UserID) || m.SyndraUserID == "")) {
 		return BranchScope{}, fmt.Errorf("%w: current assignee is missing or ambiguous", ErrBranchInput)
 	}
 	key, err := canonicalBranchRepo(repo)

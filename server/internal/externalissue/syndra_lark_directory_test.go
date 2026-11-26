@@ -24,3 +24,17 @@ func TestSyndraDirectoryProofContract(t *testing.T) {
 		t.Fatal("directory signature contract changed")
 	}
 }
+
+func TestSyndraV2DirectoryIdentity(t *testing.T) {
+	const maxID = "9223372036854775807"
+	mate := int64(17)
+	for _, invalid := range []string{"", "0", "0017", "+17", "-1", "1e3", "9223372036854775808"} {
+		if _, ok := directoryIdentity(syndraBugV2, BugSyncPerson{SyndraUserID: invalid, MateID: &mate}); ok {
+			t.Fatalf("accepted invalid v2 ID %q", invalid)
+		}
+	}
+	id, ok := directoryIdentity(syndraBugV2, BugSyncPerson{SyndraUserID: maxID, MateID: &mate})
+	if !ok || signedDirectoryProof("v2", "webhook", "response", "test", 42, id, "tenant", "employee", "王凝") != "7f63ac9d41891518bcd556eb5e0d3d34421a6223af045b79eb812eb6537a7505" {
+		t.Fatal("Python v2 signature mismatch")
+	}
+}

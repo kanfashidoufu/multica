@@ -23,6 +23,13 @@ import (
 )
 
 func TestSyndraDirectoryProvisionAndLogin(t *testing.T) {
+	for _, v := range []string{"v1", "v2"} {
+		t.Run(v, func(t *testing.T) { testSyndraDirectoryProvisionAndLogin(t, v) })
+	}
+}
+
+func testSyndraDirectoryProvisionAndLogin(t *testing.T, version string) {
+	const bigintID = "9223372036854775807"
 	ctx := t.Context()
 	ws := memberLimitWorkspace(t, 0)
 	nonce := uuid.NewString()
@@ -43,23 +50,37 @@ func TestSyndraDirectoryProvisionAndLogin(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/open/multica/version-bugs/assignee-identity":
-			if r.Host != "test-syndra.lggj.work" || r.Header.Get("Authorization") != "Bearer 258023950a475b7ff9001a77612100c7f96cd2630d5d0c3719177d50b55e3f0a" {
+			requestProof := "258023950a475b7ff9001a77612100c7f96cd2630d5d0c3719177d50b55e3f0a"
+			wireID := "17"
+			if version == "v2" {
+				requestProof = "4370da96d609a29b2f148b5a01a0a6a304d49d8f24adb08a77ebdf094539c375"
+				wireID = bigintID
+			}
+			if r.Host != "test-syndra.lggj.work" || r.Header.Get("Authorization") != "Bearer "+requestProof {
 				t.Error("wrong resolver token")
 			}
 			var ids struct {
 				Bug  int64  `json:"bug_id"`
 				Mate int64  `json:"mate_id"`
+				User string `json:"syndra_user_id"`
 				Env  string `json:"source_env"`
 			}
-			if err := json.NewDecoder(r.Body).Decode(&ids); err != nil || ids.Bug != 42 || ids.Mate != 17 || ids.Env != "test" {
+			if err := json.NewDecoder(r.Body).Decode(&ids); err != nil || ids.Bug != 42 || ids.Env != "test" ||
+				(version == "v1" && (ids.Mate != 17 || ids.User != "")) || (version == "v2" && (ids.Mate != 0 || ids.User != bigintID)) {
 				t.Error("wrong resolver request")
 			}
 			if !badProof.Load() {
 				mac := hmac.New(sha256.New, []byte("webhook"))
-				mac.Write([]byte(strings.Join([]string{"multica:syndra:bug-assignee:v1", "response", "test", "42", "17", p.TenantKey, p.ExternalUserID, p.Name}, "\x00")))
+				mac.Write([]byte(strings.Join([]string{"multica:syndra:bug-assignee:" + version, "response", "test", "42", wireID, p.TenantKey, p.ExternalUserID, p.Name}, "\x00")))
 				w.Header().Set("X-Multica-Directory-Proof", hex.EncodeToString(mac.Sum(nil)))
 			}
-			json.NewEncoder(w).Encode(map[string]any{"code": 4000, "success": true, "data": map[string]any{"bug_id": 42, "mate_id": 17, "source_env": "test", "user_id": p.ExternalUserID, "tenant_key": p.TenantKey, "name": p.Name}})
+			data := map[string]any{"bug_id": 42, "source_env": "test", "user_id": p.ExternalUserID, "tenant_key": p.TenantKey, "name": p.Name}
+			if version == "v2" {
+				data["syndra_user_id"] = wireID
+			} else {
+				data["mate_id"] = 17
+			}
+			json.NewEncoder(w).Encode(map[string]any{"code": 4000, "success": true, "data": data})
 		case "/open-apis/auth/v3/tenant_access_token/internal":
 			json.NewEncoder(w).Encode(map[string]any{"code": 0, "tenant_access_token": "directory-token", "expire": 7200})
 		case "/open-apis/tenant/v2/tenant/query":
@@ -98,6 +119,11 @@ func TestSyndraDirectoryProvisionAndLogin(t *testing.T) {
 	mate := int64(17)
 	request := externalissue.BugSyncRequest{Payload: externalissue.BugSyncPayload{Source: "syndra", SourceEnv: "test", Items: []externalissue.BugSyncItem{{Event: "upsert", EntityType: "version_bug", ExternalKey: "syndra:test:version_bug:42", BugID: 42, Title: "directory test", Status: "active", Assignee: externalissue.BugSyncPerson{MateID: &mate, Name: &p.Name},
 		Metadata: map[string]any{"bug_assignee_email_candidate": "forged@example.org"}}}}}
+	if version == "v2" {
+		request.Payload.SchemaVersion = "syndra.multica.version_bug.webhook.v2"
+		request.Payload.Items[0].Assignee.MateID = nil
+		request.Payload.Items[0].Assignee.SyndraUserID = bigintID
+	}
 	badProof.Store(true)
 	if _, err := i.ResolveBugDirectoryProfile(ctx, request.Payload, request.Payload.Items[0]); err == nil {
 		t.Fatal("accepted unsigned lookup")
@@ -138,6 +164,9 @@ func TestSyndraDirectoryProvisionAndLogin(t *testing.T) {
 	if json.Unmarshal(issue.Metadata, &meta) != nil || meta["bug_assignee_email_candidate"] != candidate {
 		t.Fatalf("missing unverified candidate: %s", issue.Metadata)
 	}
+	if version == "v2" && (meta["bug_assignee_syndra_user_id"] != bigintID || meta["bug_verified_member_id"] != uuidToString(issue.AssigneeID)) {
+		t.Fatal("verified v2 identity not preserved")
+	}
 	user, isNew, err := h.findOrCreateLarkUser(httptest.NewRequest("POST", "/auth/lark", nil), p)
 	if err != nil || isNew || user.ID != issue.AssigneeID || user.Email != larkEmail(p) {
 		t.Fatalf("first login created or selected wrong account: %v", err)
@@ -155,6 +184,15 @@ func TestSyndraDirectoryProvisionAndLogin(t *testing.T) {
 	}
 	if n := dbfx.Count(t, `SELECT count(*) FROM workspace_invitation WHERE workspace_id=$1`, ws); n != 0 {
 		t.Fatal("created invitation")
+	}
+	if version == "v2" {
+		// Having a same-name workspace member must not make an invalid v2 ID valid.
+		request.Payload.Items[0].Assignee.SyndraUserID = ""
+		request.Payload.Items[0].Assignee.MateID = &mate
+		res, err := i.ImportBugSync(ctx, request)
+		if err != nil || res.Items[0].Issue.AssigneeID != parseUUID(testUserID) {
+			t.Fatal("v2 fell back to name or mate ID")
+		}
 	}
 }
 

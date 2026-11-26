@@ -181,6 +181,7 @@ type BugSyncPayload struct {
 }
 
 type BugSyncItem struct {
+	verifiedV2Member         string
 	ambiguousAutomationOwner bool
 	emailCandidate           string         // Only set after server-side directory verification.
 	Event                    string         `json:"event,omitempty"`
@@ -218,9 +219,10 @@ type BugSyncItem struct {
 }
 
 type BugSyncPerson struct {
-	MateID   *int64  `json:"mate_id,omitempty"`
-	Name     *string `json:"name,omitempty"`
-	DeptName *string `json:"dept_name,omitempty"`
+	SyndraUserID string  `json:"syndra_user_id,omitempty"`
+	MateID       *int64  `json:"mate_id,omitempty"`
+	Name         *string `json:"name,omitempty"`
+	DeptName     *string `json:"dept_name,omitempty"`
 }
 
 type BugSyncModule struct {
@@ -1474,6 +1476,11 @@ func bugIssuePriority(item BugSyncItem) string {
 func bugIssueMetadata(payload BugSyncPayload, item BugSyncItem, provider, recordID, fallbackReason string) map[string]any {
 	b := bugMetadataBuilder{out: map[string]any{}}
 	b.add("external_source", provider)
+	b.add("bug_verified_member_id", item.verifiedV2Member)
+	b.add("bug_assignee_syndra_user_id", bugAssigneePerson(item).SyndraUserID)
+	if payload.SchemaVersion == syndraBugV2 {
+		b.add("bug_assignee_name", bugPersonName(bugAssigneePerson(item)))
+	}
 	b.add("bug_assignee_email_candidate", item.emailCandidate)
 	b.add("external_provider", provider)
 	b.add("external_key", recordID)
@@ -1532,7 +1539,7 @@ func bugIssueMetadata(payload BugSyncPayload, item BugSyncItem, provider, record
 		value := item.Metadata[rawKey]
 		key := sanitizeBugMetadataKey(rawKey)
 		switch key {
-		case "external_source", "external_key", "sync_source_env", "bug_id", "bug_entity_type", "bug_reopen_count", "bug_version_id", "bug_version_name", "bug_assignee_name", "bug_assignee_mate_id", "bug_assignee_fallback_reason", "bug_updated_at", "bug_assignee_email_candidate":
+		case "external_source", "external_key", "sync_schema_version", "sync_source_env", "bug_id", "bug_entity_type", "bug_reopen_count", "bug_version_id", "bug_version_name", "bug_assignee_name", "bug_assignee_mate_id", "bug_assignee_syndra_user_id", "bug_verified_member_id", "bug_assignee_fallback_reason", "bug_updated_at", "bug_assignee_email_candidate":
 			continue // Routing and branch scope come from structured source fields, never arbitrary metadata.
 		}
 		b.add(key, value)
@@ -1552,6 +1559,7 @@ type bugMetadataBuilder struct {
 }
 
 func (b *bugMetadataBuilder) addPerson(prefix string, person BugSyncPerson) {
+	b.add(prefix+"_syndra_user_id", person.SyndraUserID)
 	if person.MateID != nil {
 		b.add(prefix+"_mate_id", *person.MateID)
 	}
@@ -1678,7 +1686,7 @@ func bugPersonName(person BugSyncPerson) string {
 }
 
 func bugPersonHasValue(person BugSyncPerson) bool {
-	return person.MateID != nil || bugPersonName(person) != "" || (person.DeptName != nil && strings.TrimSpace(*person.DeptName) != "")
+	return person.SyndraUserID != "" || person.MateID != nil || bugPersonName(person) != "" || (person.DeptName != nil && strings.TrimSpace(*person.DeptName) != "")
 }
 
 func bugAssigneePerson(item BugSyncItem) BugSyncPerson {
@@ -2143,17 +2151,20 @@ func (i *Importer) resolveBugAssigneeMember(ctx context.Context, workspaceID pgt
 	name := bugPersonName(person)
 	fallbackReason := "missing_assignee_name"
 	if name != "" {
-		member, ok, err := i.lookupUniqueMemberByName(ctx, workspaceID, name)
-		if err != nil {
-			return db.Member{}, "", err
-		}
-		if ok {
-			return member, "", nil
+		if payload.SchemaVersion != syndraBugV2 {
+			member, ok, err := i.lookupUniqueMemberByName(ctx, workspaceID, name)
+			if err != nil {
+				return db.Member{}, "", err
+			}
+			if ok {
+				return member, "", nil
+			}
 		}
 		fallbackReason = "assignee_not_unique_or_not_member"
+		_, validID := directoryIdentity(payload.SchemaVersion, person)
 		if i.ProvisionBugMember != nil && payload.Source == "syndra" && payload.SourceEnv != "" &&
 			item.EntityType == "version_bug" && bugSyncEventSupported(item.Event) &&
-			item.BugID > 0 && person.MateID != nil && *person.MateID > 0 &&
+			item.BugID > 0 && validID &&
 			item.ExternalKey == fmt.Sprintf("syndra:%s:version_bug:%d", payload.SourceEnv, item.BugID) {
 			member, candidate, err := i.ProvisionBugMember(ctx, workspaceID, payload, *item)
 			if err == nil && member.UserID.Valid && member.WorkspaceID == workspaceID {
@@ -2163,6 +2174,9 @@ func (i *Importer) resolveBugAssigneeMember(ctx context.Context, workspaceID pgt
 				}
 				item.ambiguousAutomationOwner = !unique || named.UserID != member.UserID
 				item.emailCandidate = candidate
+				if payload.SchemaVersion == syndraBugV2 {
+					item.verifiedV2Member = util.UUIDToString(member.UserID)
+				}
 				return member, "", nil
 			}
 			if ctx.Err() != nil {

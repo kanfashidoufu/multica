@@ -230,7 +230,7 @@ Set these when Syndra sends bug or requirement events through `POST /api/webhook
 | `MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES` | `王宁` | Exact Syndra assignee names (comma-separated) eligible for automatic bug repair. New eligible bugs are assigned to the workspace-wide agent named `bug修复专家`. |
 | `MULTICA_EXTERNAL_REQUIREMENT_WORKSPACE_ID` | empty | Dedicated workspace id used by `sync_type=requirement`. The request cannot override it, keeping requirement and bug workspaces isolated |
 
-For `sync_type=bug`, Multica first matches a workspace member by name. Missing members are provisioned automatically when Syndra and Feishu verify their identity and workspace admission allows it. Otherwise the bug workspace owner handles the issue. Requirement sync uses `sync_type=requirement`, assigns the Multica agent from `executor_id`, and records that agent's owner as the issue creator. Former default-workspace/default-assignee variables and Feishu Base parameters are no longer supported.
+For `sync_type=bug`, v1 keeps its existing member-name match. Production v2 verifies the string `syndra_user_id` with Syndra and Feishu, including for existing members; missing accounts are provisioned without an invitation if admission allows. Unverified bugs remain with the workspace owner. Requirement sync uses `sync_type=requirement`, assigns the Multica agent from `executor_id`, and records that agent's owner as the issue creator. Former default-workspace/default-assignee variables and Feishu Base parameters are no longer supported.
 
 Completing a mirrored Syndra bug in Multica also writes the resolution and a result note back to Syndra. This uses the same sync credentials.
 

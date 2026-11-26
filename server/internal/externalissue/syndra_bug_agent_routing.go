@@ -62,6 +62,14 @@ func hasBugAutomationSlot(metadata map[string]any) bool {
 			return true
 		}
 	}
+	// A full v2 snapshot can exhaust the budget before optional aliases are
+	// copied. Preserve the verified owner and enrollment, not a duplicate key.
+	if metadata["sync_schema_version"] == syndraBugV2 {
+		if key, ok := metadata["bug_external_key"].(string); ok && key != "" && key == metadata["external_key"] {
+			delete(metadata, "bug_external_key")
+			return true
+		}
+	}
 	return false
 }
 
@@ -116,7 +124,7 @@ func (i *Importer) updateBugSyncMirror(ctx context.Context, existing db.Issue, r
 	}
 	// Once provisioned, later syncs match the workspace member locally.
 	// Keep the suggestion on this Bug until its source assignee changes.
-	if readable && last.Candidate != "" && last.MateID > 0 && metadata["bug_assignee_mate_id"] == last.MateID &&
+	if readable && metadata["sync_schema_version"] != syndraBugV2 && last.Candidate != "" && last.MateID > 0 && metadata["bug_assignee_mate_id"] == last.MateID &&
 		metadata["bug_assignee_name"] == last.Name && metadata["bug_assignee_fallback_reason"] == nil &&
 		metadata["bug_assignee_email_candidate"] == nil && len(metadata) < maxBugMetadataKeys {
 		metadata["bug_assignee_email_candidate"] = last.Candidate

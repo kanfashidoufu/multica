@@ -48,6 +48,14 @@ func TestBranchWaitWithdrawalOnSyndraReassignment(t *testing.T) {
 	t.Run("technical blocker", func(t *testing.T) { testBranchHandoff(t, "blocked", "agent_blocked") })
 }
 
+func TestV2BranchScopeDetectsSameNameReassignment(t *testing.T) {
+	before := []byte(`{"sync_schema_version":"syndra.multica.version_bug.webhook.v2","bug_version_id":42,"bug_assignee_name":"王宁","bug_assignee_syndra_user_id":"9223372036854775807","bug_verified_member_id":"first"}`)
+	after := []byte(`{"sync_schema_version":"syndra.multica.version_bug.webhook.v2","bug_version_id":42,"bug_assignee_name":"王宁","bug_assignee_syndra_user_id":"17","bug_verified_member_id":"second"}`)
+	if !sourceBranchScopeChanged(before, after) || sourceBranchScopeChanged(before, before) {
+		t.Fatal("v2 branch decisions must follow stable identity")
+	}
+}
+
 func testBranchHandoff(t *testing.T, status, noticeType string) {
 	ctx := t.Context()
 	pool := openTestPool(t, ctx)

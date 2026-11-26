@@ -36,8 +36,8 @@ Bug 工作区不接受请求 Query 或 body 覆盖。`workspace_id` 和 `assigne
 | Syndra | 复用当前同步来源环境，回查 Bug 的实际负责人。使用已有飞书应用读取其真实租户，并按手机号取员工 `user_id`。 |
 | Multica | 按 `prod / pre / test / dev` 选择对应环境的固定 Syndra API，未知环境不开户。回查请求与结果使用现有同步密钥按本单签名，不向回查地址转发 webhook 原始凭据。用已启用的飞书登录应用独立取得真实租户，与 Syndra 的结果比对；已配置的租户限制仍生效。 |
 
-1. 已唯一匹配工作区成员时，仍按原逻辑直接指派，不依赖新接口。否则仅用正式 Syndra Bug 的来源环境、Bug ID 与负责人 mate ID 回查实际归属；不接受 webhook 自报的飞书身份、邮箱或回调地址。
-2. Syndra 仅解析当前有效 Bug 的在职负责人，在服务端用手机号取得同租户 `user_id`。Multica 使用自己的登录应用核实租户、姓名、激活状态及该应用的 `open_id`，手机号不进入 webhook 或 Issue。
+1. 按 webhook 声明的协议处理：v1 保留工作区唯一姓名匹配和 `mate_id` 核验；生产 v2 一律用 `assignee.syndra_user_id` 回查实际指派。该字段必须是正 64 位整数的十进制字符串，不能用旧 `mate_id` 或同名账号代替。
+2. v2 由 Syndra 在配置的租户内用 `assigned_user_id → qts_user.id` 查当前在职且准入的员工，并使用生产登录应用绑定的身份取得其飞书 `user_id`。请求和回执使用 v2 专用签名域，v1 签名不能混用。Multica 再用自己的登录应用独立核实租户和员工状态；无需配置新开关。
 3. 按已绑定飞书身份或飞书目录返回的公司 `enterprise_email` 复用全局账号；双方身份冲突不合并。无邮箱时，新账号使用原登录流程的 `@lark.local` 占位地址；`bug_assignee_email_candidate` 是姓名全拼生成的**未核实建议**，不参与账号匹配、登录、邀请或发送邮件。
 4. 账号、身份绑定和普通 `member` 入组在同一事务提交，不创建邀请或登录会话。已有同范围普通成员邀请可结清；其他角色、项目邀请、注册或成员额度受限、云端托管席位等情况不绕过原生准入，维持 owner 兜底。处理原因或补齐授权后重推同一 Bug 即可。首次访问仍需本人飞书登录。
 
@@ -53,7 +53,7 @@ Bug 工作区不接受请求 Query 或 body 覆盖。`workspace_id` 和 `assigne
 
 ## 请求体
 
-Multica 当前支持 `syndra.multica.version_bug.webhook.v1` 结构，按 `items[]` 逐条 upsert。所有岗位、所有 Bug 状态及无版本 Bug 共用此入口，不代表全部进入自愈。正式 webhook body 应直接发送 `payload` 对象；为了本地验证方便，Multica 也兼容 Syndra debug-push 返回的 `{data:{payload:{...}}}` 包装结构。
+Multica 当前支持 `syndra.multica.version_bug.webhook.v1` 和 `syndra.multica.version_bug.webhook.v2` 结构，按 `items[]` 逐条 upsert。所有岗位、所有 Bug 状态及无版本 Bug 共用此入口，不代表全部进入自愈。正式 webhook body 应直接发送 `payload` 对象；为了本地验证方便，Multica 也兼容 Syndra debug-push 返回的 `{data:{payload:{...}}}` 包装结构。
 
 关键字段：
 
@@ -70,7 +70,7 @@ Multica 当前支持 `syndra.multica.version_bug.webhook.v1` 结构，按 `items
 | `items[].status/status_name` | 普通任务映射为 Multica issue 状态；已进入自动化的任务保留本地交付状态，源状态继续写入 metadata |
 | `items[].bug_level/priority` | 映射为 Multica issue 优先级 |
 | `items[].bug_type_id/bug_type` | 写入 issue metadata |
-| `items[].creator/owner/assignee/solver` | 写入 issue metadata；创建 issue 时使用 `assignee.name` 精确匹配 Bug 工作区中的唯一 Multica 用户，并把该用户作为 assignee 和 creator；也兼容 `bug_detail.assignee.name`。未匹配到唯一成员时，默认用 `mate_id` 核验当前 Bug 的飞书身份；无法核验或入组时才回退到工作区 owner。`mate_id` 本身不是 Multica 用户 ID。试运行期间，仅当推送负责人唯一匹配试运行名单成员时，才尝试将任务交给工作区公用的 bug修复专家 |
+| `items[].creator/owner/assignee/solver` | 人员信息写入 metadata。v1 沿用原匹配规则；v2 只按回查核实的飞书身份复用或创建账号，不按姓名或拼音邮箱合并。无法核实时由 owner 承接；自动修复仍受白名单约束。 |
 | `items[].module` | 写入 issue metadata |
 | `items[].resolve_solution/resolve_solution_name` | 写入 issue metadata |
 | `items[].attachments/videos` | 当前记录数量到 metadata，暂不下载并绑定 Multica attachment |

@@ -228,7 +228,7 @@ Syndra 通过 `POST /api/webhooks/external-issues` 推送 Bug 或小需求事件
 | `MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES` | `王宁` | 允许自动修复的 Syndra 负责人姓名，以英文逗号分隔。符合条件的新 Bug 指派给工作区公用智能体 `bug修复专家`。 |
 | `MULTICA_EXTERNAL_REQUIREMENT_WORKSPACE_ID` | 空 | `sync_type=requirement` 固定使用的小需求工作区 ID；不接受请求覆盖，确保与 Bug 工作区隔离 |
 
-Syndra Bug 同步（`sync_type=bug`）优先匹配已有工作区成员；缺少成员时，默认核验 Syndra 和飞书身份，通过准入检查后免邀请入组。无法核实时由 Bug 工作区 owner 承接。小需求同步使用 `sync_type=requirement`，由请求中的 `executor_id` 指派 Multica 智能体，并使用该智能体的负责人作为 issue 创建人；旧默认工作区、默认负责人环境变量和飞书多维表格参数不再支持。
+Syndra Bug 同步（`sync_type=bug`）的 v1 保留原成员匹配逻辑；生产 v2 按字符串 `syndra_user_id` 核验飞书身份，符合准入条件时自动开户并免邀请入组。不能核验时由 Bug 工作区 owner 承接。小需求同步使用 `sync_type=requirement`，由请求中的 `executor_id` 指派 Multica 智能体，并使用该智能体的负责人作为 issue 创建人；旧默认工作区、默认负责人环境变量和飞书多维表格参数不再支持。
 
 在 Multica 将同步来的 Bug 移入已完成阶段，会使用同一同步凭据将 Syndra Bug 设为已解决，并追加处理结果备注。
 
