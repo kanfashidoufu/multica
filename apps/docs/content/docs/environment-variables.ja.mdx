@@ -455,6 +455,8 @@ Syndra が `POST /api/webhooks/external-issues` に Bug または小規模要件
 
 Syndra Bug 同期（`sync_type=bug`）では、まず既存のメンバーを照合します。メンバーがいない場合、Syndra と Feishu で本人確認し、参加条件を満たしていれば招待なしで登録します。確認できない場合は Bug ワークスペースのオーナーが担当します。小規模要件同期は `sync_type=requirement` を使用し、`executor_id` の Multica Agent を割り当て、その Agent の owner を issue creator として記録します。旧デフォルト workspace/assignee 変数と Feishu Base パラメータはサポートされません。
 
+同期された Bug を Multica で完了にすると、同じ同期資格情報を使って Syndra 側を解決済みにし、対応結果を備考に追記します。
+
 ## 次のステップ
 
 - [ログインとサインアップ](/auth-setup) — ログイン方式とサインアップ制限。

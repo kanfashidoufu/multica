@@ -22,6 +22,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/dbstartup"
 	enterpriseLark "github.com/multica-ai/multica/server/internal/enterprise/lark"
 	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/internal/externalissue"
 	"github.com/multica-ai/multica/server/internal/handler"
 	"github.com/multica-ai/multica/server/internal/inbox"
 	"github.com/multica-ai/multica/server/internal/integrations/wecom"
@@ -739,6 +740,7 @@ func main() {
 
 	// Start background workers.
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
+	go externalissue.RunSyndraCompletions(sweepCtx, queries, os.Getenv("MULTICA_EXTERNAL_BUG_WORKSPACE_ID"), os.Getenv("MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN"))
 	autopilotCtx, autopilotCancel := context.WithCancel(context.Background())
 	telemetryWorker := selfhosttelemetry.New(pool, version, telemetryConfig, slog.Default())
 	// Reuse the router's services here. In particular, the router wires the

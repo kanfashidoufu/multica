@@ -1609,6 +1609,21 @@ type LarkUserBinding struct {
 	BoundAt        pgtype.Timestamptz `json:"bound_at"`
 }
 
+type LocalSyndraBugCompletion struct {
+	IssueID     pgtype.UUID        `json:"issue_id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	OriginID    pgtype.UUID        `json:"origin_id"`
+	EventID     pgtype.UUID        `json:"event_id"`
+	Revision    int64              `json:"revision"`
+	SourceEnv   string             `json:"source_env"`
+	BugID       string             `json:"bug_id"`
+	RecordKey   string             `json:"record_key"`
+	ReopenCount string             `json:"reopen_count"`
+	Outcome     string             `json:"outcome"`
+	Attempts    int32              `json:"attempts"`
+	AvailableAt pgtype.Timestamptz `json:"available_at"`
+}
+
 type MaintenanceJob struct {
 	ID             pgtype.UUID        `json:"id"`
 	JobType        string             `json:"job_type"`

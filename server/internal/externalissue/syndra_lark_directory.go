@@ -23,7 +23,11 @@ var directoryID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 // These are the Syndra web client's deployment API bases. Never use a
 // webhook-provided source_url as a service-to-service destination.
 func syndraDirectoryURL(env string) string {
-	const path = "/open/multica/version-bugs/assignee-identity"
+	return syndraBugEndpoint(env, "assignee-identity")
+}
+
+func syndraBugEndpoint(env, operation string) string {
+	path := "/open/multica/version-bugs/" + operation
 	switch env {
 	case "prod":
 		return "https://syndra.lggj.work/api" + path

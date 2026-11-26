@@ -682,6 +682,7 @@ LIMIT 1;
 -- External webhooks own their mirrored title/description/status/priority and
 -- compact source metadata, but must not overwrite scheduling, assignee,
 -- hierarchy, or project fields maintained inside Multica.
+WITH mirror AS MATERIALIZED (SELECT set_config('multica.syndra_mirror','on',true))
 UPDATE issue SET
     title = $1,
     description = $2,
@@ -700,8 +701,9 @@ UPDATE issue SET
         ELSE last_activity_at
     END,
     updated_at = now()
+FROM mirror
 WHERE id = $6 AND workspace_id = $7
-RETURNING *;
+RETURNING issue.*;
 
 -- name: CountCreatedIssueAssignees :many
 -- Count assignees on issues created by a specific user.

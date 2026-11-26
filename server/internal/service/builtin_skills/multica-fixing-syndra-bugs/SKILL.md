@@ -131,6 +131,9 @@ fetches, shallow history or a missing merge commit are unverified, not success.
 
 After every affected repo has proof, post one result in the appropriate comment
 thread with `--content-file` and the runtime-provided `--parent` when applicable.
+Start its first paragraph with `处理结果：` and summarize the fix and actual verification
+for Syndra. Only that paragraph is copied when the issue is marked done. Put internal
+handoff details after a blank line; never include credentials in the summary.
 Mention the verified current human as `[@Name](mention://member/<scope.member>)`. Include:
 
 - bug root cause and minimal change;

@@ -2331,6 +2331,7 @@ func (q *Queries) UpdateIssue(ctx context.Context, arg UpdateIssueParams) (Issue
 }
 
 const updateIssueFromExternalSync = `-- name: UpdateIssueFromExternalSync :one
+WITH mirror AS MATERIALIZED (SELECT set_config('multica.syndra_mirror','on',true))
 UPDATE issue SET
     title = $1,
     description = $2,
@@ -2349,8 +2350,9 @@ UPDATE issue SET
         ELSE last_activity_at
     END,
     updated_at = now()
+FROM mirror
 WHERE id = $6 AND workspace_id = $7
-RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, requester_user_id, description_revision
+RETURNING issue.id, issue.workspace_id, issue.title, issue.description, issue.status, issue.priority, issue.assignee_type, issue.assignee_id, issue.creator_type, issue.creator_id, issue.parent_issue_id, issue.acceptance_criteria, issue.context_refs, issue.position, issue.due_date, issue.created_at, issue.updated_at, issue.number, issue.project_id, issue.origin_type, issue.origin_id, issue.first_executed_at, issue.start_date, issue.metadata, issue.stage, issue.properties, issue.revision, issue.last_activity_at, issue.triage_state, issue.duplicate_of_issue_id, issue.requester_user_id, issue.description_revision
 `
 
 type UpdateIssueFromExternalSyncParams struct {

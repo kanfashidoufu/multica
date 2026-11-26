@@ -1532,8 +1532,8 @@ func bugIssueMetadata(payload BugSyncPayload, item BugSyncItem, provider, record
 		value := item.Metadata[rawKey]
 		key := sanitizeBugMetadataKey(rawKey)
 		switch key {
-		case "external_source", "sync_source_env", "bug_version_id", "bug_version_name", "bug_assignee_name", "bug_assignee_mate_id", "bug_assignee_fallback_reason", "bug_updated_at", "bug_assignee_email_candidate":
-			continue // Personal branch scope comes from the webhook's structured fields.
+		case "external_source", "external_key", "sync_source_env", "bug_id", "bug_entity_type", "bug_reopen_count", "bug_version_id", "bug_version_name", "bug_assignee_name", "bug_assignee_mate_id", "bug_assignee_fallback_reason", "bug_updated_at", "bug_assignee_email_candidate":
+			continue // Routing and branch scope come from structured source fields, never arbitrary metadata.
 		}
 		b.add(key, value)
 	}

@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS local_syndra_completion_issue_uidx;
