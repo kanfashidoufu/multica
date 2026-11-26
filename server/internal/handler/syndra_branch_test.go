@@ -31,8 +31,8 @@ func TestSyndraPersonalBranchesAndWaiters(t *testing.T) {
 	f.Member(t, ws, testUserID, "owner")
 	f.Member(t, ws, other, "member")
 	runtimeID := f.Runtime(t, "Branch runtime")
-	agent := f.Agent(t, "Bug agent", runtimeID)
-	otherAgent := f.Agent(t, "Other agent", runtimeID, testutil.Cols{"owner_id": other})
+	agent := f.Agent(t, externalissue.BugExpertName, runtimeID, testutil.Cols{"visibility": "workspace", "permission_mode": "public_to"})
+	f.Insert(t, "agent_invocation_target", testutil.Cols{"agent_id": agent, "target_type": "workspace", "target_id": ws})
 	// The test creates real confirmation issues, comments and native wakeups.
 	// Clean their rows in this test's private workspace, including scheduler outputs.
 	for _, table := range []string{"issue", "inbox_item", "issue_wakeup", "comment", "activity_log"} {
@@ -45,7 +45,7 @@ func TestSyndraPersonalBranchesAndWaiters(t *testing.T) {
 		meta, _ := json.Marshal(map[string]any{"bug_assignee_name": name, "sync_source_env": "prod", "bug_version_id": 42, "external_source": "syndra", "multica_bug_automation": true})
 		return f.Issue(t, "Imported", testutil.Cols{"origin_type": "external_issue", "origin_id": uuid.NewString(), "metadata": meta, "assignee_type": "agent", "assignee_id": assignee})
 	}
-	a, b, c := bug(handlerTestName, agent), bug(handlerTestName, agent), bug("Branch tester", otherAgent)
+	a, b, c := bug(handlerTestName, agent), bug(handlerTestName, agent), bug("Branch tester", agent)
 	f.Exec(t, "UPDATE workspace SET issue_counter=(SELECT max(number) FROM issue WHERE workspace_id=$1) WHERE id=$1", ws)
 	repo := "https://github.com/example/repo.git"
 	type answer struct {
@@ -58,11 +58,7 @@ func TestSyndraPersonalBranchesAndWaiters(t *testing.T) {
 		req := withURLParam(newRequestAs(user, "POST", "/", map[string]any{"repo": repo, "candidates": []string{"v3_wn"}, "missing_decision": missing}), "id", issue)
 		req.Header.Set("X-Workspace-ID", ws)
 		if task != "" {
-			actor := agent
-			if user == other {
-				actor = otherAgent
-			}
-			testutil.WithHeaders(req, "X-Actor-Source", "task_token", "X-Agent-ID", actor, "X-Task-ID", task)
+			testutil.WithHeaders(req, "X-Actor-Source", "task_token", "X-Agent-ID", agent, "X-Task-ID", task)
 		}
 		return req
 	}
@@ -110,7 +106,7 @@ func TestSyndraPersonalBranchesAndWaiters(t *testing.T) {
 	if again := read(testUserID, a, ta, ""); again.Wake != first.Wake {
 		t.Fatalf("repeated lookup created a second wakeup: %+v", again)
 	}
-	tc := f.Task(t, otherAgent, testutil.Cols{"runtime_id": runtimeID, "issue_id": c, "originator_user_id": other, "accountable_user_id": other, "status": "running"})
+	tc := f.Task(t, agent, testutil.Cols{"runtime_id": runtimeID, "issue_id": c, "originator_user_id": other, "accountable_user_id": other, "status": "running"})
 	separate := read(other, c, tc, "")
 	if separate.Wake == "" || separate.Ticket == first.Ticket {
 		t.Fatal("different members shared a ticket")
@@ -172,9 +168,11 @@ func TestSyndraPersonalBranchesAndWaiters(t *testing.T) {
 		t.Fatalf("deleted branch not reopened: %+v", v)
 	}
 	comment(other, separate.Ticket, "默认 v3_other", "")
+	oldRun := start(a)
 	f.Exec(t, `UPDATE issue SET metadata=jsonb_set(metadata,'{bug_assignee_name}',to_jsonb($2::text)) WHERE id=$1 AND workspace_id=$3`, a, "Branch tester", ws)
 	if v := read(other, a, "", ""); v.Branch != "v3_other" || v.State != "personal_default" {
 		t.Fatalf("previous member's override survived reassignment: %+v", v)
 	}
 	testutil.Call(t, testHandler.ResolveSyndraBranch, request(testUserID, a, "", "")).Want(403)
+	testutil.Call(t, testHandler.ResolveSyndraBranch, request(testUserID, a, oldRun, "")).Want(409)
 }

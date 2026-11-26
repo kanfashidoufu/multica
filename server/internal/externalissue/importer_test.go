@@ -539,6 +539,49 @@ func TestImportBugSyncAssignsMappedBugAssignee(t *testing.T) {
 	assertAssigneeInboxCount(t, ctx, pool, issue.ID, fx.User.ID, 0)
 }
 
+func TestBugSyncReassignsSameIssueAndRecoversMissingAccount(t *testing.T) {
+	ctx := t.Context()
+	pool := openTestPool(t, ctx)
+	q := db.New(pool)
+	fx := createImporterFixture(t, ctx, pool, q)
+	bus := events.New()
+	importer := &Importer{Queries: q, IssueService: service.NewIssueService(q, pool, bus, analytics.NoopClient{}, nil),
+		Config: Config{WebhookToken: "test-token", BugWorkspaceID: util.UUIDToString(fx.Workspace.ID)}}
+	original := createImporterWorkspaceMember(t, ctx, pool, q, fx.Workspace.ID, "原负责人", "")
+	sync := func(name, status, timestamp string) BugSyncItemResult {
+		t.Helper()
+		res, err := importer.ImportBugSync(ctx, BugSyncRequest{Payload: BugSyncPayload{Source: "syndra", SourceEnv: "test",
+			Items: []BugSyncItem{{Event: "upsert", BugID: 42, Role: "backend", Title: "后端 Bug", Status: status, UpdatedAt: timestamp,
+				Assignee: BugSyncPerson{Name: strPtr(name)}}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Items[0]
+	}
+	first := sync("原负责人", "active", "2026-11-01T12:00:01+08:00")
+	next := sync("尚未加入", "closed", "2026-11-01T12:00:02+08:00")
+	if !next.Existing || next.Issue.ID != first.Issue.ID || next.Issue.CreatorID != original.User.ID ||
+		next.Issue.AssigneeID != fx.User.ID || next.Issue.Status != "done" ||
+		!strings.Contains(string(next.Issue.Metadata), "assignee_not_unique_or_not_member") {
+		t.Fatalf("unexpected fallback update: %s %s", next.Issue.Status, next.Issue.Metadata)
+	}
+	late := sync("原负责人", "active", "2026-11-01T12:00:01+08:00")
+	if late.Issue.AssigneeID != fx.User.ID || late.Issue.Status != "done" {
+		t.Fatal("late snapshot reverted issue")
+	}
+	added := createImporterWorkspaceMember(t, ctx, pool, q, fx.Workspace.ID, "尚未加入", "")
+	for n := 0; n < 2; n++ {
+		restored := sync("尚未加入", "active", "2026-11-01T12:00:03+08:00")
+		if !restored.Existing || restored.Issue.ID != first.Issue.ID || restored.Issue.AssigneeID != added.User.ID ||
+			restored.Issue.CreatorID != original.User.ID || restored.Issue.Status != "todo" ||
+			strings.Contains(string(restored.Issue.Metadata), "bug_assignee_fallback_reason") {
+			t.Fatal("account reconciliation failed")
+		}
+	}
+	assertAssigneeSubscribedAndInbox(t, ctx, q, pool, first.Issue.ID, added.User.ID)
+	assertAssigneeInboxCount(t, ctx, pool, first.Issue.ID, fx.User.ID, 1)
+}
+
 func TestImportBugSyncFallsBackToWorkspaceOwner(t *testing.T) {
 	ctx := context.Background()
 	pool := openTestPool(t, ctx)
@@ -605,13 +648,14 @@ func TestImportBugSyncFallsBackToWorkspaceOwner(t *testing.T) {
 	}
 }
 
-func TestImportBugSyncRoutesToUniqueOwnedAgentAndKeepsHumanReviewer(t *testing.T) {
+func TestImportBugSyncRoutesToSharedExpertAndKeepsHumanReviewer(t *testing.T) {
 	ctx := context.Background()
 	pool := openTestPool(t, ctx)
 	q := db.New(pool)
 	fx := createImporterFixture(t, ctx, pool, q)
 	reviewer := createImporterWorkspaceMember(t, ctx, pool, q, fx.Workspace.ID, "王宁", "")
-	developerAgent := createImporterOwnedAgent(t, ctx, pool, q, fx.Workspace.ID, reviewer.User.ID, "王宁的开发智能体")
+	createImporterOwnedAgent(t, ctx, pool, q, fx.Workspace.ID, reviewer.User.ID, "王宁的开发智能体")
+	developerAgent := createImporterSharedExpert(t, ctx, pool, q, fx.Workspace.ID, fx.User.ID)
 
 	bus := events.New()
 	taskSvc := service.NewTaskService(q, pool, nil, bus)
@@ -642,7 +686,7 @@ func TestImportBugSyncRoutesToUniqueOwnedAgentAndKeepsHumanReviewer(t *testing.T
 				BugID:       1082,
 				VersionID:   163,
 				VersionName: "v2.91.56-企业一体化项目看板",
-				Title:       "自动交给处理人的智能体",
+				Title:       "自动交给工作区修复专家",
 				BugLevel:    "P2",
 				Status:      "active",
 				Assignee:    BugSyncPerson{MateID: int64Ptr(2401), Name: strPtr("王宁")},
@@ -693,30 +737,7 @@ func TestImportBugSyncRoutesToUniqueOwnedAgentAndKeepsHumanReviewer(t *testing.T
 	assertAssigneeSubscribedAndInbox(t, ctx, q, pool, issue.ID, reviewer.User.ID)
 }
 
-func TestResolveBugDeveloperAssignmentRequiresExactlyOneRunnableOwnedAgent(t *testing.T) {
-	reviewerID := pgtype.UUID{Bytes: [16]byte{1}, Valid: true}
-	otherOwnerID := pgtype.UUID{Bytes: [16]byte{2}, Valid: true}
-	runtimeID := pgtype.UUID{Bytes: [16]byte{3}, Valid: true}
-	firstAgentID := pgtype.UUID{Bytes: [16]byte{4}, Valid: true}
-	secondAgentID := pgtype.UUID{Bytes: [16]byte{5}, Valid: true}
-
-	one := resolveBugDeveloperAssignment(reviewerID, []db.Agent{
-		{ID: firstAgentID, OwnerID: reviewerID, RuntimeID: runtimeID, Name: "Developer"},
-		{ID: secondAgentID, OwnerID: otherOwnerID, RuntimeID: runtimeID, Name: "Someone else's"},
-		{ID: secondAgentID, OwnerID: reviewerID, Name: "No runtime"},
-	})
-	if one.CandidateCount != 1 || one.DeveloperAgentID != firstAgentID {
-		t.Fatalf("unique assignment = %#v", one)
-	}
-
-	ambiguous := resolveBugDeveloperAssignment(reviewerID, []db.Agent{
-		{ID: firstAgentID, OwnerID: reviewerID, RuntimeID: runtimeID, Name: "First"},
-		{ID: secondAgentID, OwnerID: reviewerID, RuntimeID: runtimeID, Name: "Second"},
-	})
-	if ambiguous.CandidateCount != 2 || ambiguous.DeveloperAgentID.Valid {
-		t.Fatalf("ambiguous assignment = %#v", ambiguous)
-	}
-
+func TestBugDevelopmentRequiresActionableStatus(t *testing.T) {
 	if !bugStatusStartsDevelopment("todo") || !bugStatusStartsDevelopment("in_progress") ||
 		bugStatusStartsDevelopment("done") {
 		t.Fatal("bug development status gate drifted")
@@ -1272,4 +1293,13 @@ func createImporterOwnedAgent(t *testing.T, ctx context.Context, pool *pgxpool.P
 		t.Fatal(err)
 	}
 	return agent
+}
+
+func createImporterSharedExpert(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *db.Queries, workspaceID, ownerID pgtype.UUID) db.Agent {
+	t.Helper()
+	expert := createImporterOwnedAgent(t, ctx, pool, q, workspaceID, ownerID, BugExpertName)
+	f := dbfx.New(pool, util.UUIDToString(workspaceID), util.UUIDToString(ownerID))
+	f.Exec(t, "UPDATE agent SET permission_mode='public_to',visibility='workspace' WHERE id=$1", expert.ID)
+	f.Insert(t, "agent_invocation_target", dbfx.Cols{"agent_id": expert.ID, "target_type": "workspace", "target_id": workspaceID})
+	return expert
 }

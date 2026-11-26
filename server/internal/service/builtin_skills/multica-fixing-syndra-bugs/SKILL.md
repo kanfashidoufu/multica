@@ -22,8 +22,8 @@ Read the current issue and its relevant comment threads using the runtime's
 commands. Confirm `external_source=syndra`, `multica_bug_automation=true`, and
 `creator_type=member`. Use the branch resolver's current member UUID, verified
 against the workspace roster. The importer controls pilot enrollment; the
-creator may no longer be the assignee. Stop if the current agent is no longer
-the member's agent. Confirmation issues themselves are not enrolled Bugs.
+shared workspace agent `bug修复专家` executes the repair. Use the current Bug
+assignee's identity for decisions, including on resumed runs.
 
 Use the actual `bug_id`, `bug_version_id`, `bug_version_name`, environment,
 reproduction steps and source evidence. An environment branch (`dev`, `test`,
@@ -36,9 +36,10 @@ cursor is not a missing decision: Syndra sync replaces mirror metadata; comments
 and the provider's current PR state carry the recoverable evidence. Page back
 through relevant threads when a decision is older than the latest 30 replies.
 
-Identify every affected repository from project resources, workspace repos,
-code and reproduction evidence. Do not pick a repo merely because it is the
-first or only cached checkout. For a cross-repository fix, keep a separate
+Read the workspace repo registry (URLs and descriptions) with `multica repo list --output json`
+or the `repos` field of `multica workspace get --output json`. Shortlist by module,
+error, route or API, then verify the responsible code in managed checkouts.
+If evidence cannot identify the repo, ask the assignee. For a cross-repository fix, keep a separate
 branch decision, isolated checkout, PR and delivery proof per repository. The
 issue is not delivered until all affected repositories are integrated.
 
@@ -68,15 +69,11 @@ there is no routine plan approval. Missing evidence that prevents a defensible
 fix is a blocker. Use relevant QTB diagnostic tools/skills if they are installed
 and applicable; do not assume private tools exist on every runtime.
 
-Use one isolated task branch and one PR per repository for this bug. Never edit
-the shared `local_directory` in `in_place` mode. Multica now supports
-`local_directory.execution_mode=worktree`: use the returned managed worktree,
-including its conversation branch and prior-turn work. Verify its identity and
-base first. Do not switch the user-owned source directory or recreate a managed
-checkout after edits. For `github_repo`, use `multica repo checkout` as described
-in the branch reference. A native local worktree can be used without a
-`github_repo` resource if its verified remote and forge support the delivery
-procedure.
+For each affected registry URL use `multica repo checkout` and develop on
+the returned isolated task branch. A native `local_directory.execution_mode=worktree`
+checkout can be reused when its origin matches the selected repo. Preserve
+prior-turn changes and keep one PR per Bug per repo. Never edit an in-place
+user checkout or share working files between concurrent bugs.
 
 Add a meaningful regression test where practical, make the minimum fix and run
 the repository's relevant checks. Inspect the final diff for unrelated work and

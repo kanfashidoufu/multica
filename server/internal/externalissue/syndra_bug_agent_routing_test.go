@@ -92,6 +92,13 @@ func TestBugAutomationMirrorDoesNotOverflowMetadata(t *testing.T) {
 	if _, _, _, err := bugAutomationMirror(existing, "source", "done", metadata); err == nil {
 		t.Fatal("full mirror must not erase enrollment or exceed metadata capacity")
 	}
+	delete(metadata, "key_0")
+	delete(metadata, "key_1")
+	metadata["source"], metadata["external_source"] = "syndra", "syndra"
+	_, status, _, err := bugAutomationMirror(existing, "source", "done", metadata)
+	if err != nil || status != "blocked" || len(metadata) != maxBugMetadataKeys || metadata[bugAutomationMetadataKey] != true || metadata["external_source"] != "syndra" {
+		t.Fatalf("failed to preserve enrollment on full Syndra snapshot: %v", err)
+	}
 }
 
 func TestBugAutomationImportPilotAndRepeatedSync(t *testing.T) {
@@ -101,7 +108,8 @@ func TestBugAutomationImportPilotAndRepeatedSync(t *testing.T) {
 	fx := createImporterFixture(t, ctx, pool, q)
 	pilot := createImporterWorkspaceMember(t, ctx, pool, q, fx.Workspace.ID, "王宁", "")
 	other := createImporterWorkspaceMember(t, ctx, pool, q, fx.Workspace.ID, "刘鹏", "")
-	pilotAgent := createImporterOwnedAgent(t, ctx, pool, q, fx.Workspace.ID, pilot.User.ID, "Pilot")
+	pilotAgent := createImporterSharedExpert(t, ctx, pool, q, fx.Workspace.ID, fx.User.ID)
+	createImporterOwnedAgent(t, ctx, pool, q, fx.Workspace.ID, pilot.User.ID, "Pilot")
 	createImporterOwnedAgent(t, ctx, pool, q, fx.Workspace.ID, other.User.ID, "Other")
 	bus := events.New()
 	tasks := service.NewTaskService(q, pool, nil, bus)
@@ -149,7 +157,7 @@ func TestBugAutomationImportPilotAndRepeatedSync(t *testing.T) {
 			}
 			// The importer found the row before the agent blocked it. The update
 			// must use the locked current state rather than that old snapshot.
-			previous, mirrored, err := importer.updateBugSyncMirror(ctx, issue, issue.Title, "source", "done", issue.Priority, map[string]any{"external_source": "syndra"})
+			previous, mirrored, err := importer.updateBugSyncMirror(ctx, issue, db.Member{UserID: pilot.User.ID}, issue.Title, "source", "done", issue.Priority, map[string]any{"external_source": "syndra"})
 			if err != nil || previous.Status != "blocked" || mirrored.Status != "blocked" {
 				t.Fatalf("stale snapshot overwrote agent state: %s %s %v", previous.Status, mirrored.Status, err)
 			}
@@ -192,8 +200,35 @@ func TestBugAgentEnqueueFailureReturnsBugToHuman(t *testing.T) {
 	}
 	bus := events.New()
 	importer := &Importer{Queries: q, IssueService: service.NewIssueService(q, pool, bus, analytics.NoopClient{}, service.NewTaskService(q, pool, nil, bus))}
-	result, err := importer.routeNewBugToDeveloperAgent(ctx, issue, bugDeveloperAssignment{ReviewerID: fx.User.ID, DeveloperAgentID: parse(agentID)})
+	result, err := importer.routeNewBugToDeveloperAgent(ctx, issue, bugDeveloperAssignment{Reviewer: db.Member{UserID: fx.User.ID}, DeveloperAgentID: parse(agentID)})
 	if err == nil || result.AssigneeID != fx.User.ID || result.AssigneeType.String != "member" {
 		t.Fatalf("failed enqueue abandoned bug on agent: %v %v", result.AssigneeType, err)
 	}
+}
+
+func TestBugRoutingRequiresWorkspaceGrantForNamedExpert(t *testing.T) {
+	ctx := t.Context()
+	pool := openTestPool(t, ctx)
+	q := db.New(pool)
+	fx := createImporterFixture(t, ctx, pool, q)
+	f := dbfx.New(pool, util.UUIDToString(fx.Workspace.ID), util.UUIDToString(fx.User.ID))
+	createImporterOwnedAgent(t, ctx, pool, q, fx.Workspace.ID, fx.User.ID, "个人开发助手")
+	i := Importer{Queries: q}
+	count := func(want int) {
+		t.Helper()
+		got := i.listWorkspaceBugExperts(ctx, BugSyncPayload{}, fx.Workspace.ID)
+		if len(got) != want {
+			t.Fatalf("workspace bug experts=%d, want %d", len(got), want)
+		}
+	}
+	count(0)
+	expert := createImporterOwnedAgent(t, ctx, pool, q, fx.Workspace.ID, fx.User.ID, BugExpertName)
+	count(0)
+	f.Exec(t, "UPDATE agent SET visibility='workspace', permission_mode='public_to' WHERE id=$1", expert.ID)
+	f.Insert(t, "agent_invocation_target", dbfx.Cols{"agent_id": expert.ID, "target_type": "member", "target_id": fx.User.ID})
+	count(0)
+	f.Insert(t, "agent_invocation_target", dbfx.Cols{"agent_id": expert.ID, "target_type": "workspace", "target_id": fx.Workspace.ID})
+	count(1)
+	f.Exec(t, "UPDATE agent SET runtime_id=NULL WHERE id=$1", expert.ID)
+	count(0)
 }

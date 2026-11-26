@@ -6,7 +6,7 @@ Bug importer、内置 skill、脚本和测试。没有新增数据库迁移，�
 
 ## 运行链路
 
-Syndra 导入 → 王宁精确匹配与唯一智能体选择 → 写入证据及交付验收 → 智能体运行
+Syndra 导入 → 名单成员匹配与工作区公用专家选择 → 写入证据及交付验收 → 智能体运行
 → 确认版本分支 → 隔离修复和验证 → 合并版本分支 → 推进 `test` → 远端包含性验证 → `in_review`。
 
 负责人或智能体不确定时保留成员处理。版本分支不能确认时，由当前人工指派人在任务
@@ -17,13 +17,13 @@ Syndra 导入 → 王宁精确匹配与唯一智能体选择 → 写入证据及
 | 位置 | 职责 |
 | --- | --- |
 | `server/internal/externalissue/importer.go` | 复用当前 Bug 工作区、成员解析及镜像更新；仅新建流程接入派发；对已接入试运行的任务保留交付状态 |
-| `server/internal/externalissue/syndra_bug_agent_routing.go` | 王宁试运行限制、唯一可执行智能体选择、成员责任归属、入队失败恢复及局部同步规则 |
+| `server/internal/externalissue/syndra_bug_agent_routing.go` | 试运行名单、工作区公用 bug修复专家选择、成员责任归属、入队失败恢复及局部同步规则 |
 | `server/internal/service/builtin_skills/multica-fixing-syndra-bugs/` | 分支证据、人工介入、工作恢复、最小修复、版本集成、`test` 推进和交付验证 |
 | `server/internal/service/syndra_bug_skill_test.go` | 临时 Git 远端与模拟 GitHub CLI 的可执行验证；不调用真实智能体或实际 PR |
 | `server/internal/externalissue/*test.go` | 试运行范围、原有成员回退、责任人、重复同步及失败恢复 |
 
 内部标记 `multica_bug_automation` 由 importer 设置，源系统不能通过 metadata
-开启它。普通同步逻辑不变；已接入的任务保留 Multica 状态，Syndra 原状态仍写入
+开启它。普通 Bug 的指派人按 Syndra 快照同步；已接入自愈的任务保留执行智能体和 Multica 状态，Syndra 原状态仍写入
 原有 `bug_status` 字段。不会根据旧任务的名字或当前负责人追补启动历史任务。
 试运行成员通过 `MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES` 配置为逗号分隔的精确姓名；
 未配置时保持默认名单 `王宁`，因此扩展测试人员只需改部署环境变量，不需要修改 importer 或 Skill。

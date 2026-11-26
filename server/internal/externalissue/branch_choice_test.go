@@ -37,7 +37,7 @@ func TestBranchScopeIdentity(t *testing.T) {
 func TestSyndraBranchScopeUsesStructuredMirror(t *testing.T) {
 	person := "王宁"
 	item := BugSyncItem{BugDetail: BugSyncDetail{Assignee: BugSyncPerson{Name: &person}, Version: BugSyncVersion{VersionID: 42, VersionName: "v3.12.0"}}, Metadata: map[string]any{"bug_assignee_name": "another", "bug_version_id": 99, "sync_source_env": "test"}}
-	m := bugIssueMetadata(BugSyncPayload{SourceEnv: "prod"}, item, "syndra", "key")
+	m := bugIssueMetadata(BugSyncPayload{SourceEnv: "prod"}, item, "syndra", "key", "")
 	if m["bug_assignee_name"] != person || m["bug_version_id"] != int64(42) || m["sync_source_env"] != "prod" || m["bug_version_name"] != "v3.12.0" {
 		t.Fatalf("incorrect branch scope: %#v", m)
 	}
@@ -75,7 +75,7 @@ func testBranchHandoff(t *testing.T, status, noticeType string) {
 		name    string
 		enabled int
 	}{{"王宁", 1}, {"新成员", 0}, {"新成员", 0}} {
-		_, updated, err := i.updateBugSyncMirror(ctx, issue, "waiting", "source", "todo", "none", map[string]any{"bug_assignee_name": tc.name, "sync_source_env": "prod", "bug_version_id": 42})
+		_, updated, err := i.updateBugSyncMirror(ctx, issue, db.Member{UserID: newOwner.User.ID}, "waiting", "source", "todo", "none", map[string]any{"bug_assignee_name": tc.name, "sync_source_env": "prod", "bug_version_id": 42})
 		if err != nil {
 			t.Fatal(err)
 		}

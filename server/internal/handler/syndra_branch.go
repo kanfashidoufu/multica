@@ -63,8 +63,8 @@ func (h *Handler) ResolveSyndraBranch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actorType, actorID := h.resolveActor(r, requestUserID(r), scope.Workspace)
-	// Only the bug's assigned run or the current source member can initiate
-	// a question. An old owner's agent cannot borrow a new owner's identity.
+	// The shared executor acts for the current source member. Reassignment
+	// must not let a run started for the previous member use the new default.
 	if actorType == "agent" {
 		task, valid := h.taskFromRequestHeader(r)
 		if !valid || task.IssueID != bug.ID || task.AgentID != bug.AssigneeID || uuidToString(task.AgentID) != actorID || bug.AssigneeType.String != "agent" {
@@ -72,7 +72,20 @@ func (h *Handler) ResolveSyndraBranch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		agent, err := h.Queries.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: bug.AssigneeID, WorkspaceID: bug.WorkspaceID})
-		if err != nil || uuidToString(agent.OwnerID) != scope.Member {
+		if err != nil {
+			branchError(w, err)
+			return
+		}
+		shared, err := externalissue.IsWorkspaceBugExpert(ctx, h.Queries, agent, bug.WorkspaceID)
+		if err != nil {
+			branchError(w, err)
+			return
+		}
+		if !shared {
+			writeError(w, 403, "assigned agent is not the workspace bug repair expert")
+			return
+		}
+		if isTerminalTaskStatus(task.Status) || uuidToString(task.OriginatorUserID) != scope.Member {
 			writeError(w, 409, "Syndra assignee changed; preserve work and hand off to the current member")
 			return
 		}

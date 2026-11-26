@@ -127,16 +127,18 @@ func (c Config) withDefaults() Config {
 }
 
 type Importer struct {
-	Queries           *db.Queries
-	IssueService      *service.IssueService
-	Storage           storage.Storage
-	LarkInstallations *lark.InstallationService
-	LarkAPIClient     lark.APIClient
-	Bus               *events.Bus
-	BroadcastPayload  func(ctx context.Context, issue db.Issue, attachments []db.Attachment) map[string]any
-	HTTPClient        *http.Client
-	Logger            *slog.Logger
-	Config            Config
+	// Optional, server-configured admission for the dedicated Syndra Bug workspace.
+	ProvisionBugMember func(context.Context, pgtype.UUID, BugSyncPayload, BugSyncItem) (db.Member, string, error)
+	Queries            *db.Queries
+	IssueService       *service.IssueService
+	Storage            storage.Storage
+	LarkInstallations  *lark.InstallationService
+	LarkAPIClient      lark.APIClient
+	Bus                *events.Bus
+	BroadcastPayload   func(ctx context.Context, issue db.Issue, attachments []db.Attachment) map[string]any
+	HTTPClient         *http.Client
+	Logger             *slog.Logger
+	Config             Config
 
 	larkAppTokenMu sync.Mutex
 	larkAppToken   cachedLarkAppToken
@@ -179,38 +181,40 @@ type BugSyncPayload struct {
 }
 
 type BugSyncItem struct {
-	Event               string         `json:"event,omitempty"`
-	EntityType          string         `json:"entity_type,omitempty"`
-	ExternalKey         string         `json:"external_key,omitempty"`
-	BugID               int64          `json:"bug_id,omitempty"`
-	VersionID           int64          `json:"version_id,omitempty"`
-	VersionName         string         `json:"version_name,omitempty"`
-	DemandName          string         `json:"demand_name,omitempty"`
-	Role                string         `json:"role,omitempty"`
-	Title               string         `json:"title,omitempty"`
-	Description         string         `json:"description,omitempty"`
-	Priority            string         `json:"priority,omitempty"`
-	BugLevel            string         `json:"bug_level,omitempty"`
-	BugTypeID           int64          `json:"bug_type_id,omitempty"`
-	BugType             string         `json:"bug_type,omitempty"`
-	Status              string         `json:"status,omitempty"`
-	StatusName          string         `json:"status_name,omitempty"`
-	ResolveSolution     any            `json:"resolve_solution,omitempty"`
-	ResolveSolutionName string         `json:"resolve_solution_name,omitempty"`
-	Owner               BugSyncPerson  `json:"owner,omitempty"`
-	Creator             BugSyncPerson  `json:"creator,omitempty"`
-	Assignee            BugSyncPerson  `json:"assignee,omitempty"`
-	Solver              BugSyncPerson  `json:"solver,omitempty"`
-	Module              BugSyncModule  `json:"module,omitempty"`
-	DuplicateBug        any            `json:"duplicate_bug,omitempty"`
-	Attachments         []BugSyncMedia `json:"attachments,omitempty"`
-	Videos              []BugSyncMedia `json:"videos,omitempty"`
-	BugDetail           BugSyncDetail  `json:"bug_detail,omitempty"`
-	Labels              []string       `json:"labels,omitempty"`
-	SourceURL           string         `json:"source_url,omitempty"`
-	CreatedAt           string         `json:"created_at,omitempty"`
-	UpdatedAt           string         `json:"updated_at,omitempty"`
-	Metadata            map[string]any `json:"metadata,omitempty"`
+	ambiguousAutomationOwner bool
+	emailCandidate           string         // Only set after server-side directory verification.
+	Event                    string         `json:"event,omitempty"`
+	EntityType               string         `json:"entity_type,omitempty"`
+	ExternalKey              string         `json:"external_key,omitempty"`
+	BugID                    int64          `json:"bug_id,omitempty"`
+	VersionID                int64          `json:"version_id,omitempty"`
+	VersionName              string         `json:"version_name,omitempty"`
+	DemandName               string         `json:"demand_name,omitempty"`
+	Role                     string         `json:"role,omitempty"`
+	Title                    string         `json:"title,omitempty"`
+	Description              string         `json:"description,omitempty"`
+	Priority                 string         `json:"priority,omitempty"`
+	BugLevel                 string         `json:"bug_level,omitempty"`
+	BugTypeID                int64          `json:"bug_type_id,omitempty"`
+	BugType                  string         `json:"bug_type,omitempty"`
+	Status                   string         `json:"status,omitempty"`
+	StatusName               string         `json:"status_name,omitempty"`
+	ResolveSolution          any            `json:"resolve_solution,omitempty"`
+	ResolveSolutionName      string         `json:"resolve_solution_name,omitempty"`
+	Owner                    BugSyncPerson  `json:"owner,omitempty"`
+	Creator                  BugSyncPerson  `json:"creator,omitempty"`
+	Assignee                 BugSyncPerson  `json:"assignee,omitempty"`
+	Solver                   BugSyncPerson  `json:"solver,omitempty"`
+	Module                   BugSyncModule  `json:"module,omitempty"`
+	DuplicateBug             any            `json:"duplicate_bug,omitempty"`
+	Attachments              []BugSyncMedia `json:"attachments,omitempty"`
+	Videos                   []BugSyncMedia `json:"videos,omitempty"`
+	BugDetail                BugSyncDetail  `json:"bug_detail,omitempty"`
+	Labels                   []string       `json:"labels,omitempty"`
+	SourceURL                string         `json:"source_url,omitempty"`
+	CreatedAt                string         `json:"created_at,omitempty"`
+	UpdatedAt                string         `json:"updated_at,omitempty"`
+	Metadata                 map[string]any `json:"metadata,omitempty"`
 }
 
 type BugSyncPerson struct {
@@ -644,7 +648,7 @@ func (i *Importer) ImportBugSync(ctx context.Context, req BugSyncRequest) (BugSy
 		return BugSyncResult{}, fmt.Errorf("%w: invalid workspace UUID", ErrBugWorkspaceNotConfigured)
 	}
 
-	workspaceAgents := i.listBugDeveloperAgents(ctx, req.Payload, workspaceID)
+	experts := i.listWorkspaceBugExperts(ctx, req.Payload, workspaceID)
 
 	provider := bugProvider(req.Payload)
 	i.info("external bug sync: batch started",
@@ -667,7 +671,7 @@ func (i *Importer) ImportBugSync(ctx context.Context, req BugSyncRequest) (BugSy
 			"event", item.Event,
 			"entity_type", item.EntityType,
 		)
-		assignee, fallbackReason, err := i.resolveBugAssigneeMember(ctx, workspaceID, item)
+		assignee, fallbackReason, err := i.resolveBugAssigneeMember(ctx, workspaceID, req.Payload, &item)
 		if err != nil {
 			i.warn("external bug sync: item assignee resolve failed",
 				"provider", provider,
@@ -706,9 +710,9 @@ func (i *Importer) ImportBugSync(ctx context.Context, req BugSyncRequest) (BugSy
 			provider,
 			recordID,
 			item,
-			assignee.UserID,
+			assignee,
 			fallbackReason,
-			workspaceAgents,
+			experts,
 		)
 		itemResult, err := i.importBugSyncItem(ctx, req.Payload, item, workspaceID, assignment)
 		if err != nil {
@@ -782,7 +786,7 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 	description := bugIssueDescription(item)
 	status := bugIssueStatus(item)
 	priority := bugIssuePriority(item)
-	metadata := bugIssueMetadata(payload, item, provider, recordID)
+	metadata := bugIssueMetadata(payload, item, provider, recordID, assignment.FallbackReason)
 	delete(metadata, bugAutomationMetadataKey)
 	i.info("external bug sync: item normalized",
 		"provider", provider,
@@ -827,7 +831,7 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 			"issue_id", util.UUIDToString(existing.ID),
 			"issue_number", existing.Number,
 		)
-		existing, updated, err := i.updateBugSyncMirror(ctx, existing, title, description, status, priority, metadata)
+		existing, updated, err := i.updateBugSyncMirror(ctx, existing, assignment.Reviewer, title, description, status, priority, metadata)
 		if err != nil {
 			i.warn("external bug sync: existing issue update failed",
 				"provider", provider,
@@ -876,7 +880,7 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 		return BugSyncItemResult{}, fmt.Errorf("lookup existing bug issue by origin: %w", err)
 	}
 
-	if assignment.DeveloperAgentID.Valid && bugStatusStartsDevelopment(status) && i.IssueService.TaskService != nil && len(metadata) < maxBugMetadataKeys {
+	if assignment.DeveloperAgentID.Valid && bugStatusStartsDevelopment(status) && i.IssueService.TaskService != nil && hasBugAutomationSlot(metadata) {
 		metadata[bugAutomationMetadataKey] = true
 		description += bugAutomationAcceptance
 		metadataBytes, err = json.Marshal(metadata)
@@ -886,7 +890,7 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 	}
 
 	createOpts := service.IssueCreateOpts{
-		ActorID:  util.UUIDToString(assignment.ReviewerID),
+		ActorID:  util.UUIDToString(assignment.Reviewer.UserID),
 		Platform: "external_import:" + provider,
 	}
 	if i.BroadcastPayload != nil {
@@ -901,9 +905,9 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 		Status:         status,
 		Priority:       priority,
 		AssigneeType:   pgtype.Text{String: "member", Valid: true},
-		AssigneeID:     assignment.ReviewerID,
+		AssigneeID:     assignment.Reviewer.UserID,
 		CreatorType:    "member",
-		CreatorID:      assignment.ReviewerID,
+		CreatorID:      assignment.Reviewer.UserID,
 		OriginType:     pgtype.Text{String: OriginType, Valid: true},
 		OriginID:       originID,
 		AllowDuplicate: true,
@@ -924,7 +928,7 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 				"issue_id", util.UUIDToString(existing.ID),
 				"issue_number", existing.Number,
 			)
-			existing, updated, updateErr := i.updateBugSyncMirror(ctx, existing, title, bugIssueDescription(item), status, priority, metadata)
+			existing, updated, updateErr := i.updateBugSyncMirror(ctx, existing, assignment.Reviewer, title, bugIssueDescription(item), status, priority, metadata)
 			if updateErr != nil {
 				i.warn("external bug sync: raced issue update failed",
 					"provider", provider,
@@ -982,7 +986,7 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 		"status", status,
 		"priority", priority,
 		"assignee_type", "member",
-		"assignee_id", util.UUIDToString(assignment.ReviewerID),
+		"assignee_id", util.UUIDToString(assignment.Reviewer.UserID),
 	)
 
 	updated, err := i.Queries.UpdateIssueFromExternalSync(ctx, db.UpdateIssueFromExternalSyncParams{
@@ -1021,7 +1025,7 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 	i.publishIssueMetadataChanged(updated, "external_bug_sync")
 
 	updated = i.routeNewBugToDeveloperAgentIfEligible(ctx, updated, assignment, status)
-	i.notifyAssignee(ctx, updated, assignment.ReviewerID)
+	i.notifyAssignee(ctx, updated, assignment.Reviewer.UserID)
 	return BugSyncItemResult{
 		Issue:          updated,
 		Provider:       provider,
@@ -1467,9 +1471,10 @@ func bugIssuePriority(item BugSyncItem) string {
 	}
 }
 
-func bugIssueMetadata(payload BugSyncPayload, item BugSyncItem, provider, recordID string) map[string]any {
+func bugIssueMetadata(payload BugSyncPayload, item BugSyncItem, provider, recordID, fallbackReason string) map[string]any {
 	b := bugMetadataBuilder{out: map[string]any{}}
 	b.add("external_source", provider)
+	b.add("bug_assignee_email_candidate", item.emailCandidate)
 	b.add("external_provider", provider)
 	b.add("external_key", recordID)
 	b.add("external_url", firstNonEmpty(item.SourceURL, item.BugDetail.SourceURL))
@@ -1483,6 +1488,8 @@ func bugIssueMetadata(payload BugSyncPayload, item BugSyncItem, provider, record
 	b.add("bug_external_key", item.ExternalKey)
 	b.add("bug_entity_type", item.EntityType)
 	b.add("bug_event", item.Event)
+	b.add("syndra_processing_status", item.Metadata["syndra_processing_status"])
+	b.add("bug_assignee_fallback_reason", fallbackReason)
 	versionID := item.VersionID
 	if versionID == 0 {
 		versionID = item.BugDetail.Version.VersionID
@@ -1516,10 +1523,16 @@ func bugIssueMetadata(payload BugSyncPayload, item BugSyncItem, provider, record
 	b.addPerson("bug_creator", item.Creator)
 	b.addPerson("bug_assignee", bugAssigneePerson(item))
 	b.addPerson("bug_solver", item.Solver)
-	for key, value := range item.Metadata {
-		key = sanitizeBugMetadataKey(key)
+	keys := make([]string, 0, len(item.Metadata))
+	for key := range item.Metadata {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, rawKey := range keys {
+		value := item.Metadata[rawKey]
+		key := sanitizeBugMetadataKey(rawKey)
 		switch key {
-		case "external_source", "sync_source_env", "bug_version_id", "bug_version_name", "bug_assignee_name":
+		case "external_source", "sync_source_env", "bug_version_id", "bug_version_name", "bug_assignee_name", "bug_assignee_mate_id", "bug_assignee_fallback_reason", "bug_updated_at", "bug_assignee_email_candidate":
 			continue // Personal branch scope comes from the webhook's structured fields.
 		}
 		b.add(key, value)
@@ -2125,8 +2138,8 @@ func (i *Importer) resolveMemberByExternalUserID(ctx context.Context, workspaceI
 	return member, nil
 }
 
-func (i *Importer) resolveBugAssigneeMember(ctx context.Context, workspaceID pgtype.UUID, item BugSyncItem) (db.Member, string, error) {
-	person := bugAssigneePerson(item)
+func (i *Importer) resolveBugAssigneeMember(ctx context.Context, workspaceID pgtype.UUID, payload BugSyncPayload, item *BugSyncItem) (db.Member, string, error) {
+	person := bugAssigneePerson(*item)
 	name := bugPersonName(person)
 	fallbackReason := "missing_assignee_name"
 	if name != "" {
@@ -2138,6 +2151,26 @@ func (i *Importer) resolveBugAssigneeMember(ctx context.Context, workspaceID pgt
 			return member, "", nil
 		}
 		fallbackReason = "assignee_not_unique_or_not_member"
+		if i.ProvisionBugMember != nil && payload.Source == "syndra" && payload.SourceEnv != "" &&
+			item.EntityType == "version_bug" && bugSyncEventSupported(item.Event) &&
+			item.BugID > 0 && person.MateID != nil && *person.MateID > 0 &&
+			item.ExternalKey == fmt.Sprintf("syndra:%s:version_bug:%d", payload.SourceEnv, item.BugID) {
+			member, candidate, err := i.ProvisionBugMember(ctx, workspaceID, payload, *item)
+			if err == nil && member.UserID.Valid && member.WorkspaceID == workspaceID {
+				named, unique, err := i.lookupUniqueMemberByName(ctx, workspaceID, name)
+				if err != nil {
+					return db.Member{}, "", err
+				}
+				item.ambiguousAutomationOwner = !unique || named.UserID != member.UserID
+				item.emailCandidate = candidate
+				return member, "", nil
+			}
+			if ctx.Err() != nil {
+				return db.Member{}, "", ctx.Err()
+			}
+			fallbackReason = "lark_member_provision_unavailable"
+			i.warn("external bug sync: member provisioning declined", "bug_id", item.BugID, "error", err)
+		}
 	}
 
 	owner, err := i.lookupWorkspaceOwner(ctx, workspaceID)

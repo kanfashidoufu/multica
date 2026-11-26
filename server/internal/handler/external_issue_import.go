@@ -48,6 +48,7 @@ func (h *Handler) ImportExternalIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sync_type"))) {
 	case "bug":
+		h.configureSyndraProvisioning(importer)
 		handleExternalBugSync(w, r, importer, buildIssueResponse)
 	case "requirement":
 		handleExternalRequirementSync(w, r, importer, buildIssueResponse)

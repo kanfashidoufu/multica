@@ -16,13 +16,13 @@ Pass one candidate flag per actual match, or none when there are none. Network f
 - **waiting**: the command finds or creates one shared confirmation issue assigned to the member. For an assigned agent run it also registers a one-time native wakeup for this Bug when the confirmation issue reaches done (check `wakeup_id`). Before implementation, use `blocked --no-start` while the target is unknown. If a finished patch is awaiting only the assignee's target confirmation, use `in_review --no-start` and link the patch; no merge until the target is verified. In both cases leave the confirmation issue link and marker in the Bug thread. Do not send another branch question; other Bugs in this scope use the same ticket. The member replies **默认 <branch>** on that ticket, or **确认** for its sole proposal; only **更换默认 <branch>** replaces an existing default. The server records their comment and completes the confirmation issue, not the Bug.
 - **Only this Bug**: the member can reply **仅本单 <branch>** directly to the agent's marked comment on the original Bug. This takes precedence for that Bug and repository only. It does not complete the shared confirmation or release any other waiters. Previously confirmed, unambiguously scoped individual replies may still be used for that Bug alone; never promote old replies to a shared default.
 - **Stale target**: a successful remote lookup proving that the personal branch is gone permits repeating the command with `--missing-decision <decision_comment_id>`. Only the caller receiving `reopened=true` posts a replacement request on the shared ticket, mentioning the member and listing fresh candidates. A missing per-Bug override needs a new per-Bug reply. Never invalidate a default because of an authentication or network failure.
-- **Changed assignee/repository/version**: on a wake, before editing, and immediately before either integration, read the current source and run the resolver again. Compare the full scope and decision to the recorded one. Never reuse another member's choice, even for this same Bug. If work/PR already exists, preserve it and report both targets for human handoff; do not automatically retarget. A different agent owner, missing/ambiguous member, missing version ID or environment, unavailable resolver, or failed wakeup registration is a blocker; never guess a shared scope or promise a wakeup without a saved rule.
+- **Changed assignee/repository/version**: on a wake, before editing, and immediately before either integration, read the current source and run the resolver again. Compare the full scope and decision to the recorded one. Never reuse another member's choice, even for this same Bug. If work/PR already exists, preserve it and report both targets for human handoff; do not automatically retarget. A run acting for a previous assignee, missing/ambiguous member, missing version ID or environment, unavailable resolver, or failed wakeup registration is a blocker; never guess a shared scope or promise a wakeup without a saved rule.
 
 Keep the source human as the branch decision and review contact. Remote branches with `_wn` or `_merge` are legitimate; do not rank by suffix or recent activity. Once the branch is established and fetched, clear stale waiting metadata. Use `in_progress --no-start` when resuming development or integration; keep `in_review` if only acceptance remains. Each Bug still starts from the fresh version tip, not the prior Bug's commit or task branch.
 
 ## Checkout and continuation
 
-For `github_repo`, use a managed checkout for discovery if no existing checkout
+For a selected workspace registry URL, use a managed checkout for discovery if no existing checkout
 is available:
 
 ```bash
@@ -44,11 +44,11 @@ the actual SHA and align the fresh task branch to the fetched remote commit
 if necessary.
 Never write directly on the version branch.
 
-Repeated `repo checkout` can reset/clean a checkout or choose a new task branch.
-On continuation, reuse the verified existing branch/PR and integrate the new
-base with ordinary git operations after preserving work. For a new run without
+On continuation, a managed checkout can preserve the current task branch and
+only refresh its refs. Verify HEAD and the remote before editing. Keep the
+existing branch/PR and integrate base changes there. For a new run without
 the old checkout, recover the pushed PR head into the new isolated checkout.
-Do not overwrite unpublished previous work; report recovery needs if unavailable.
+Preserve unpublished work; do not use `--fresh` to select a version branch.
 
 For a native `local_directory` worktree, the runtime already created a separate
 checkout and conversation branch. Do not call `repo checkout` to recreate it.

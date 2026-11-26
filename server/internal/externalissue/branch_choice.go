@@ -100,7 +100,7 @@ func sourceBranchScopeChanged(before, after []byte) bool {
 
 // A waiting run has nobody in the foreground to report a changed assignment.
 // Make its handoff visible without starting the old agent or moving its PR.
-func branchHandoffNotice(ctx context.Context, q *db.Queries, issue db.Issue) (db.InboxItem, error) {
+func branchHandoffNotice(ctx context.Context, q *db.Queries, issue db.Issue, reviewerID pgtype.UUID) (db.InboxItem, error) {
 	var kind, body string
 	switch issue.Status {
 	case "in_review":
@@ -112,16 +112,11 @@ func branchHandoffNotice(ctx context.Context, q *db.Queries, issue db.Issue) (db
 	default:
 		return db.InboxItem{}, nil
 	}
-	var scope mirroredBranchOwner
-	if err := json.Unmarshal(issue.Metadata, &scope); err != nil {
-		return db.InboxItem{}, err
-	}
-	member, found, err := (&Importer{Queries: q}).lookupUniqueMemberByName(ctx, issue.WorkspaceID, scope.Name)
-	if err != nil || !found {
-		return db.InboxItem{}, err
+	if !reviewerID.Valid {
+		return db.InboxItem{}, nil
 	}
 	item, err := q.CreateInboxItem(ctx, db.CreateInboxItemParams{
-		ID: dbid.NewV7(), WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, RecipientType: "member", RecipientID: member.UserID,
+		ID: dbid.NewV7(), WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, RecipientType: "member", RecipientID: reviewerID,
 		Type: kind, Severity: "action_required", Title: issue.Title,
 		Body:    util.StrToText(body),
 		Details: []byte(`{"reason":"syndra_branch_scope_changed"}`),
