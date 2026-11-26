@@ -230,6 +230,8 @@ Syndra 通过 `POST /api/webhooks/external-issues` 推送 Bug 或小需求事件
 
 Syndra Bug 同步（`sync_type=bug`）的 v1 保留原成员匹配逻辑；生产 v2 按字符串 `syndra_user_id` 核验飞书身份，符合准入条件时自动开户并免邀请入组。不能核验时由 Bug 工作区 owner 承接。小需求同步使用 `sync_type=requirement`，由请求中的 `executor_id` 指派 Multica 智能体，并使用该智能体的负责人作为 issue 创建人；旧默认工作区、默认负责人环境变量和飞书多维表格参数不再支持。
 
+预建账号使用 `@lark.local` 占位时，本人用飞书登录后会补全可用且未被占用的企业邮箱，并更新飞书返回的头像。已有真实邮箱不覆盖，邮箱冲突不合并账号。
+
 在 Multica 将同步来的 Bug 移入已完成阶段，会使用同一同步凭据将 Syndra Bug 设为已解决，并追加处理结果备注。
 
 ## Release 发布

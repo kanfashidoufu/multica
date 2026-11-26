@@ -32,14 +32,15 @@ type Config struct {
 }
 
 type Profile struct {
-	ExternalUserID string
-	OpenID         string
-	UnionID        string
-	TenantKey      string
-	Email          string
-	Name           string
-	AvatarURL      string
-	Raw            json.RawMessage
+	ExternalUserID  string
+	OpenID          string
+	UnionID         string
+	TenantKey       string
+	Email           string
+	EnterpriseEmail string // Authoritative mailbox for enriching an already bound account.
+	Name            string
+	AvatarURL       string
+	Raw             json.RawMessage
 }
 
 type OAuthClient struct {
@@ -101,12 +102,27 @@ func (c *OAuthClient) ExchangeCode(ctx context.Context, code, redirectURI string
 		return Profile{}, err
 	}
 	profile := profileFromMap(token.fields, token.raw)
-	if profile.OpenID == "" || profile.Name == "" || profile.TenantKey == "" || profile.Email == "" {
-		userInfo, err := c.fetchUserInfo(ctx, token.accessToken)
-		if err != nil {
+	needIdentity := profile.OpenID == "" || profile.Name == "" || profile.TenantKey == "" || profile.Email == ""
+	if needIdentity || (token.accessToken != "" && (profile.AvatarURL == "" || profile.EnterpriseEmail == "")) {
+		infoCtx := ctx
+		if !needIdentity {
+			// Do not spend the full login timeout obtaining optional profile fields.
+			var cancel context.CancelFunc
+			infoCtx, cancel = context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+		}
+		userInfo, err := c.fetchUserInfo(infoCtx, token.accessToken)
+		if err != nil && needIdentity {
 			return Profile{}, err
 		}
-		profile = mergeProfile(profile, profileFromMap(userInfo.fields, userInfo.raw))
+		if err == nil {
+			detail := profileFromMap(userInfo.fields, userInfo.raw)
+			if (profile.OpenID != "" && detail.OpenID != "" && profile.OpenID != detail.OpenID) ||
+				(profile.TenantKey != "" && detail.TenantKey != "" && profile.TenantKey != detail.TenantKey) {
+				return Profile{}, errors.New("Lark user info identity does not match the login token")
+			}
+			profile = mergeProfile(profile, detail)
+		}
 	}
 	if profile.TenantKey == "" {
 		profile.TenantKey = c.cfg.DefaultTenant
@@ -195,14 +211,15 @@ func (c *OAuthClient) decodeLarkResponse(req *http.Request, tokenField string) (
 
 func profileFromMap(fields map[string]any, raw json.RawMessage) Profile {
 	return Profile{
-		ExternalUserID: firstNonEmpty(stringField(fields, "user_id"), stringField(fields, "userId")),
-		OpenID:         firstNonEmpty(stringField(fields, "open_id"), stringField(fields, "openId")),
-		UnionID:        firstNonEmpty(stringField(fields, "union_id"), stringField(fields, "unionId")),
-		TenantKey:      firstNonEmpty(stringField(fields, "tenant_key"), stringField(fields, "tenantKey")),
-		Email:          strings.ToLower(strings.TrimSpace(stringField(fields, "email"))),
-		Name:           firstNonEmpty(stringField(fields, "name"), stringField(fields, "en_name")),
-		AvatarURL:      firstNonEmpty(stringField(fields, "avatar_url"), stringField(fields, "avatar_thumb"), stringField(fields, "avatar_middle"), stringField(fields, "avatar_big")),
-		Raw:            raw,
+		ExternalUserID:  firstNonEmpty(stringField(fields, "user_id"), stringField(fields, "userId")),
+		OpenID:          firstNonEmpty(stringField(fields, "open_id"), stringField(fields, "openId")),
+		UnionID:         firstNonEmpty(stringField(fields, "union_id"), stringField(fields, "unionId")),
+		TenantKey:       firstNonEmpty(stringField(fields, "tenant_key"), stringField(fields, "tenantKey")),
+		Email:           strings.ToLower(strings.TrimSpace(stringField(fields, "email"))),
+		EnterpriseEmail: strings.ToLower(strings.TrimSpace(stringField(fields, "enterprise_email"))),
+		Name:            firstNonEmpty(stringField(fields, "name"), stringField(fields, "en_name")),
+		AvatarURL:       firstNonEmpty(stringField(fields, "avatar_url"), stringField(fields, "avatar_thumb"), stringField(fields, "avatar_middle"), stringField(fields, "avatar_big")),
+		Raw:             raw,
 	}
 }
 
@@ -221,6 +238,9 @@ func mergeProfile(primary, fallback Profile) Profile {
 	}
 	if primary.Email == "" {
 		primary.Email = fallback.Email
+	}
+	if primary.EnterpriseEmail == "" {
+		primary.EnterpriseEmail = fallback.EnterpriseEmail
 	}
 	if primary.Name == "" {
 		primary.Name = fallback.Name

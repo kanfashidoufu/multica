@@ -232,6 +232,8 @@ Set these when Syndra sends bug or requirement events through `POST /api/webhook
 
 For `sync_type=bug`, v1 keeps its existing member-name match. Production v2 verifies the string `syndra_user_id` with Syndra and Feishu, including for existing members; missing accounts are provisioned without an invitation if admission allows. Unverified bugs remain with the workspace owner. Requirement sync uses `sync_type=requirement`, assigns the Multica agent from `executor_id`, and records that agent's owner as the issue creator. Former default-workspace/default-assignee variables and Feishu Base parameters are no longer supported.
 
+For provisioned accounts with an `@lark.local` placeholder, signing in with Feishu fills the mailbox from the returned enterprise email if it is available and unused. It does not overwrite an existing real mailbox or merge accounts. A returned avatar refreshes the same account.
+
 Completing a mirrored Syndra bug in Multica also writes the resolution and a result note back to Syndra. This uses the same sync credentials.
 
 ## Release publishing

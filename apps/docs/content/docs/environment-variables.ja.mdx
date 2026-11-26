@@ -455,6 +455,8 @@ Syndra が `POST /api/webhooks/external-issues` に Bug または小規模要件
 
 Syndra Bug 同期（`sync_type=bug`）の v1 は従来のメンバー照合を維持します。運用環境の v2 は文字列 `syndra_user_id` と Feishu の ID を照合し、条件を満たせば招待なしでアカウントとメンバーシップを作成します。確認できない場合はワークスペースのオーナーが担当します。小規模要件同期は `sync_type=requirement` を使用し、`executor_id` の Multica Agent を割り当て、その Agent の owner を issue creator として記録します。旧デフォルト workspace/assignee 変数と Feishu Base パラメータはサポートされません。
 
+事前作成されたアカウントのメールアドレスが `@lark.local` の場合、本人が Feishu でログインすると、取得できた未使用の企業メールアドレスを設定し、返されたアバターを更新します。既存の実アドレスを上書きしたり、アカウントを統合したりすることはありません。
+
 同期された Bug を Multica で完了にすると、同じ同期資格情報を使って Syndra 側を解決済みにし、対応結果を備考に追記します。
 
 ## 次のステップ

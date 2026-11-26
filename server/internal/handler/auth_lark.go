@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -102,6 +104,7 @@ func (h *Handler) findOrCreateLarkUser(r *http.Request, profile enterpriseLark.P
 		OpenID:    profile.OpenID,
 	})
 	isNew := false
+	alreadyBound := err == nil
 	if err != nil {
 		if !isNotFound(err) {
 			return db.User{}, false, err
@@ -113,31 +116,92 @@ func (h *Handler) findOrCreateLarkUser(r *http.Request, profile enterpriseLark.P
 		}
 	}
 
-	user, err = h.updateUserFromLarkProfile(r, user, profile)
+	if alreadyBound && strings.HasSuffix(user.Email, "@lark.local") && canFillLarkLoginEmail(user, profile) {
+		updated, err := h.completeLarkPlaceholderProfile(r.Context(), user, profile)
+		return updated, false, err
+	}
+	user, err = persistLarkLoginProfile(r.Context(), h.Queries, user, profile, alreadyBound)
+	return user, isNew, err
+}
+
+func persistLarkLoginProfile(ctx context.Context, q *db.Queries, user db.User, profile enterpriseLark.Profile, alreadyBound bool) (db.User, error) {
+	user, err := updateUserFromLarkProfile(ctx, q, user, profile)
 	if err != nil {
-		return db.User{}, false, err
+		return db.User{}, err
+	}
+	bindingEmail := profile.Email
+	if alreadyBound {
+		// Invitations can resolve an external identity by its email. Do not
+		// publish a contact address (or another account's mailbox) on this binding.
+		bindingEmail = user.Email
+		if strings.HasSuffix(bindingEmail, "@lark.local") {
+			bindingEmail = ""
+		}
 	}
 
 	raw := profile.Raw
 	if len(raw) == 0 {
 		raw = []byte("{}")
 	}
-	if _, err := h.Queries.UpsertUserExternalIdentityByOpenID(r.Context(), db.UpsertUserExternalIdentityByOpenIDParams{
+	if _, err := q.UpsertUserExternalIdentityByOpenID(ctx, db.UpsertUserExternalIdentityByOpenIDParams{
 		UserID:         user.ID,
 		Provider:       enterpriseLark.ProviderName,
 		TenantKey:      profile.TenantKey,
 		ExternalUserID: strToText(profile.ExternalUserID),
 		OpenID:         strToText(profile.OpenID),
 		UnionID:        strToText(profile.UnionID),
-		Email:          strToText(profile.Email),
+		Email:          strToText(bindingEmail),
 		Name:           strToText(profile.Name),
 		AvatarUrl:      strToText(profile.AvatarURL),
 		RawProfile:     raw,
 	}); err != nil {
-		return db.User{}, false, err
+		return db.User{}, err
 	}
 
-	return user, isNew, nil
+	return user, nil
+}
+
+func canFillLarkLoginEmail(user db.User, profile enterpriseLark.Profile) bool {
+	email := profile.EnterpriseEmail
+	if email == "" || profile.OpenID == "" || profile.TenantKey == "" || strings.HasSuffix(email, "@lark.local") ||
+		auth.IsTemporarilyDisabledUser(uuidToString(user.ID), user.Email) || auth.IsTemporarilyDisabledUserEmail(email) {
+		return false
+	}
+	address, err := mail.ParseAddress(email)
+	return err == nil && address.Address == email
+}
+
+func (h *Handler) completeLarkPlaceholderProfile(ctx context.Context, user db.User, profile enterpriseLark.Profile) (db.User, error) {
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return db.User{}, err
+	}
+	defer tx.Rollback(ctx)
+	q := h.Queries.WithTx(tx)
+	updated, err := q.FillLarkPlaceholderEmail(ctx, db.FillLarkPlaceholderEmailParams{
+		UserID: user.ID, PlaceholderEmail: user.Email, EnterpriseEmail: profile.EnterpriseEmail, TenantKey: profile.TenantKey, OpenID: profile.OpenID,
+	})
+	if isUniqueViolation(err) || isNotFound(err) {
+		// Another account owns the address, or a concurrent login already
+		// filled this account. Keep the identity; never look up a user by the new email.
+		_ = tx.Rollback(ctx)
+		current, err := h.Queries.GetUser(ctx, user.ID)
+		if err != nil {
+			return db.User{}, err
+		}
+		return persistLarkLoginProfile(ctx, h.Queries, current, profile, true)
+	}
+	if err != nil {
+		return db.User{}, err
+	}
+	updated, err = persistLarkLoginProfile(ctx, q, updated, profile, true)
+	if err != nil {
+		return db.User{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return db.User{}, err
+	}
+	return updated, nil
 }
 
 func (h *Handler) completeLarkLoginOnboarding(r *http.Request, user db.User) (db.User, error) {
@@ -162,7 +226,7 @@ func (h *Handler) completeLarkLoginOnboarding(r *http.Request, user db.User) (db
 	return user, nil
 }
 
-func (h *Handler) updateUserFromLarkProfile(r *http.Request, user db.User, profile enterpriseLark.Profile) (db.User, error) {
+func updateUserFromLarkProfile(ctx context.Context, q *db.Queries, user db.User, profile enterpriseLark.Profile) (db.User, error) {
 	name := strings.TrimSpace(profile.Name)
 	avatarURL := strings.TrimSpace(profile.AvatarURL)
 	if name == "" && avatarURL == "" {
@@ -183,7 +247,7 @@ func (h *Handler) updateUserFromLarkProfile(r *http.Request, user db.User, profi
 	if !needsUpdate {
 		return user, nil
 	}
-	updated, err := h.Queries.UpdateUser(r.Context(), db.UpdateUserParams{
+	updated, err := q.UpdateUser(ctx, db.UpdateUserParams{
 		ID:        user.ID,
 		Name:      newName,
 		AvatarUrl: newAvatar,

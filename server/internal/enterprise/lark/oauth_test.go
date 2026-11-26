@@ -31,13 +31,14 @@ func TestExchangeCodeFetchesUserInfoAndChecksTenant(t *testing.T) {
 			return jsonResponse(map[string]any{
 				"code": 0,
 				"data": map[string]any{
-					"user_id":    "user_1",
-					"open_id":    "ou_1",
-					"union_id":   "on_1",
-					"tenant_key": "tenant_1",
-					"email":      "USER@example.com",
-					"name":       "Ada",
-					"avatar_url": "https://example.com/avatar.png",
+					"user_id":          "user_1",
+					"open_id":          "ou_1",
+					"union_id":         "on_1",
+					"tenant_key":       "tenant_1",
+					"email":            "USER@example.com",
+					"enterprise_email": " ADA@company.test ",
+					"name":             "Ada",
+					"avatar_url":       "https://example.com/avatar.png",
 				},
 			}), nil
 		default:
@@ -70,6 +71,52 @@ func TestExchangeCodeFetchesUserInfoAndChecksTenant(t *testing.T) {
 	}
 	if profile.Email != "user@example.com" {
 		t.Fatalf("email should be normalized, got %q", profile.Email)
+	}
+	if profile.EnterpriseEmail != "ada@company.test" || profile.AvatarURL != "https://example.com/avatar.png" {
+		t.Fatal("enterprise email or avatar was not parsed from user_info")
+	}
+}
+
+func TestOptionalLarkUserInfo(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		status  int
+		detail  map[string]any
+		wantErr bool
+	}{
+		{"fills omitted email and avatar", 200, map[string]any{"open_id": "ou_1", "tenant_key": "t", "enterprise_email": "employee@company.test", "avatar_thumb": "https://example.test/avatar"}, false},
+		{"optional failure keeps complete login", 503, nil, false},
+		{"rejects inconsistent employee", 200, map[string]any{"open_id": "ou_another", "tenant_key": "t", "enterprise_email": "other@company.test"}, true},
+		{"rejects inconsistent tenant", 200, map[string]any{"open_id": "ou_1", "tenant_key": "another", "enterprise_email": "other@company.test"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			client := NewOAuthClient(Config{Enabled: true, AppID: "test", AppSecret: "test", TokenURL: "https://test/token", UserInfoURL: "https://test/user_info"}, &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/token" {
+					return jsonResponse(map[string]any{"access_token": "test-user-token", "open_id": "ou_1", "tenant_key": "t", "name": "Employee", "email": "contact@example.test"}), nil
+				}
+				calls++
+				if r.URL.Path != "/user_info" || r.Header.Get("Authorization") != "Bearer test-user-token" {
+					t.Fatal("unexpected profile request")
+				}
+				resp := jsonResponse(map[string]any{"code": 0, "data": tc.detail})
+				resp.StatusCode = tc.status
+				return resp, nil
+			})})
+			p, err := client.ExchangeCode(context.Background(), "test-code", "")
+			if calls != 1 || (err != nil) != tc.wantErr {
+				t.Fatalf("calls=%d err=%v", calls, err)
+			}
+			if tc.wantErr {
+				return
+			}
+			if p.OpenID != "ou_1" || p.Email != "contact@example.test" {
+				t.Fatal("lost original login identity")
+			}
+			if tc.status == 200 && (p.EnterpriseEmail != "employee@company.test" || p.AvatarURL != "https://example.test/avatar") {
+				t.Fatal("profile not completed")
+			}
+		})
 	}
 }
 

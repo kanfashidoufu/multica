@@ -455,6 +455,8 @@ Syndra가 `POST /api/webhooks/external-issues`로 Bug 또는 소규모 요구사
 
 Syndra Bug 동기화(`sync_type=bug`)에서 v1은 기존 멤버 확인 방식을 유지합니다. 운영 v2는 문자열 `syndra_user_id`로 Feishu 신원을 확인하고 조건을 충족하면 초대 없이 계정을 생성하고 멤버로 추가합니다. 확인하지 못하면 워크스페이스 소유자가 담당합니다. 소규모 요구사항 동기화는 `sync_type=requirement`를 사용하고 `executor_id`의 Multica Agent를 할당하며 해당 Agent의 owner를 issue creator로 기록합니다. 기존 기본 workspace/assignee 변수와 Feishu Base 파라미터는 더 이상 지원하지 않습니다.
 
+미리 생성한 계정의 이메일이 `@lark.local`이면 본인이 Feishu로 로그인할 때 다른 계정에서 사용하지 않는 기업 이메일로 채우고 반환된 아바타를 갱신합니다. 기존 실제 이메일을 덮어쓰거나 계정을 병합하지 않습니다.
+
 동기화된 Bug를 Multica에서 완료로 변경하면 같은 동기화 자격 증명으로 Syndra Bug를 해결됨으로 바꾸고 처리 결과를 메모에 추가합니다.
 
 ## 다음 단계
