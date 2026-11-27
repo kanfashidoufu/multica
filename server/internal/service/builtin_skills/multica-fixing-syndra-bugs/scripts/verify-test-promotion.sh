@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export GIT_ALLOW_PROTOCOL=ssh GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o StrictHostKeyChecking=yes}"
 
 if [[ $# != 3 ]]; then
   echo "usage: verify-test-promotion.sh <repo-path> <test-branch> <version-tip-sha>" >&2

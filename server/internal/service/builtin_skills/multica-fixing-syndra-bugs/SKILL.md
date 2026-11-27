@@ -38,7 +38,7 @@ through relevant threads when a decision is older than the latest 30 replies.
 
 Read the workspace repo registry (URLs and descriptions) with `multica repo list --output json`
 or the `repos` field of `multica workspace get --output json`. Shortlist by module,
-error, route or API, then verify the responsible code in managed checkouts.
+error, route or API, then verify the responsible code in SSH-only isolated worktrees.
 If evidence cannot identify the repo, ask the assignee. For a cross-repository fix, keep a separate
 branch decision, isolated checkout, PR and delivery proof per repository. The
 issue is not delivered until all affected repositories are integrated.
@@ -69,9 +69,9 @@ there is no routine plan approval. Missing evidence that prevents a defensible
 fix is a blocker. Use relevant QTB diagnostic tools/skills if they are installed
 and applicable; do not assume private tools exist on every runtime.
 
-For each affected registry URL use `multica repo checkout` and develop on
-the returned isolated task branch. A native `local_directory.execution_mode=worktree`
-checkout can be reused when its origin matches the selected repo. Preserve
+Follow the SSH checkout procedure; set `GIT_ALLOW_PROTOCOL=ssh` for all Git transfers,
+including submodules. Never fall back to HTTPS or change shared Git configuration.
+Reuse an isolated worktree only with verified SSH fetch and push endpoints. Preserve
 prior-turn changes and keep one PR per Bug per repo. Never edit an in-place
 user checkout or share working files between concurrent bugs.
 

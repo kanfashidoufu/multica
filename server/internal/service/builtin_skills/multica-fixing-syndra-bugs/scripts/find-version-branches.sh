@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export GIT_ALLOW_PROTOCOL=ssh GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o StrictHostKeyChecking=yes}"
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
   echo "usage: find-version-branches.sh <version-name> [repo-path]" >&2

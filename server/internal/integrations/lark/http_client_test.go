@@ -583,6 +583,24 @@ func TestHTTPClient_SendInteractiveCard_HappyPath(t *testing.T) {
 // `content` envelope all matter — Lark rejects anything off-spec and
 // the failures are silent-but-non-2xx, which is hard to debug
 // in production without this kind of contract pin.
+func TestHTTPClient_SendTextMessage_DirectRecipient(t *testing.T) {
+	for _, idType := range []string{"open_id", "user_id", "union_id"} {
+		t.Run(idType, func(t *testing.T) {
+			fake := newLarkFake(t)
+			fake.stubToken("tok_expert", 7200)
+			fake.stubSend(map[string]any{"code": 0, "data": map[string]string{"message_id": "om_direct"}}, func(r *http.Request, b map[string]string) {
+				if r.URL.Query().Get("receive_id_type") != idType || b["receive_id"] != "fixture" || b["uuid"] != "item-1" {
+					t.Error("unexpected direct recipient or idempotency key")
+				}
+			})
+			_, err := newTestClient(fake, time.Now).SendTextMessage(t.Context(), SendTextParams{InstallationID: testCreds(), RecipientID: "fixture", RecipientIDType: idType, IdempotencyKey: "item-1", Text: "分支等待"})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestHTTPClient_SendTextMessage_HappyPath(t *testing.T) {
 	fake := newLarkFake(t)
 	fake.stubToken("tok_text", 7200)

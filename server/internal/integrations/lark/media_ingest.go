@@ -81,7 +81,7 @@ func (r *feishuMediaResolver) ResolveMedia(ctx context.Context, inst engine.Reso
 		r.logMediaWarn("lark media ingest skipped: installation payload unavailable", lm, nil)
 		return msg
 	}
-	creds, err := installationCredentialsFor(larkInst, r.creds)
+	creds, err := larkInst.Credentials(r.creds)
 	if err != nil {
 		r.logMediaWarn("lark media ingest skipped: credentials unavailable", lm, err)
 		return msg

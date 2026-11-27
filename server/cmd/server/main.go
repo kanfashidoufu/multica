@@ -717,6 +717,13 @@ func main() {
 	// stops writing it as well as sending the snapshot.
 	h.TaskService.RecordMemberActivity = telemetryConfig.Enabled
 	h.InboxTrimmer = inboxTrimmer
+	var expertDispatcher *notifications.Dispatcher
+	if h.LarkInstallations != nil && h.LarkAPIClient != nil {
+		cfg := notifications.ConfigFromEnv()
+		cfg.Enabled = true // Active expert installation, independent of the unified app.
+		expertDispatcher = notifications.NewDispatcher(queries, cfg, handler.SyndraExpertNotifications{Handler: h})
+		expertDispatcher.RegisterInboxListener(bus)
+	}
 	var replicaQueries *db.Queries
 	if replicaPool != nil {
 		replicaQueries = db.New(replicaPool)
@@ -794,6 +801,9 @@ func main() {
 	go heartbeatScheduler.Run(sweepCtx)
 	go runAutopilotFailureMonitor(autopilotCtx, queries, bus, envFailureMonitorConfig())
 	go notificationDispatcher.RunWorker(sweepCtx)
+	if expertDispatcher != nil {
+		go expertDispatcher.RunWorker(sweepCtx)
+	}
 	go invitationNotifier.RunWorker(sweepCtx)
 	if autopilotSvc.QuotaEnabled() {
 		go runAutopilotQuotaReconciler(autopilotCtx, autopilotSvc)

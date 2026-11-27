@@ -49,7 +49,74 @@ func syndraTestRepo(t *testing.T) (string, string, string) {
 	syndraGit(t, "init", "--bare", remote)
 	syndraGit(t, "-C", repo, "remote", "add", "origin", remote)
 	syndraGit(t, "-C", repo, "push", "origin", "HEAD:refs/heads/main")
+	syndraGit(t, "-C", remote, "symbolic-ref", "HEAD", "refs/heads/main")
+	// Real Git protocol against a local fixture; never resolve a host or use
+	// the developer's SSH credentials. The fake transport accepts only this repo.
+	ssh := filepath.Join(dir, "fixture-ssh")
+	if err := os.WriteFile(ssh, []byte(`#!/usr/bin/env bash
+set -eu
+case "${!#}" in
+  "git-upload-pack 'example/repo.git'") exec git-upload-pack "$SYNDRA_TEST_REMOTE" ;;
+  "git-receive-pack 'example/repo.git'") exec git-receive-pack "$SYNDRA_TEST_REMOTE" ;;
+  *) exit 1 ;;
+esac
+`), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_SSH_COMMAND", ssh)
+	t.Setenv("GIT_SSH_VARIANT", "ssh")
+	t.Setenv("SYNDRA_TEST_REMOTE", remote)
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	syndraGit(t, "-C", repo, "remote", "set-url", "origin", "git@fixture.invalid:example/repo.git")
 	return repo, remote, syndraGit(t, "-C", repo, "rev-parse", "HEAD")
+}
+
+func TestSyndraSSHWorktree(t *testing.T) {
+	_, _, base := syndraTestRepo(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "multica"), []byte("#!/bin/sh\nprintf '%s\\n' '[{\"url\":\"https://fixture.invalid/example/repo.git\"}]'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	script := syndraSkillScript(t, "ssh-worktree.sh")
+	run := func(registry, slot string) error {
+		cmd := exec.Command("bash", script, registry, slot)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		t.Log(string(out))
+		return err
+	}
+	const registered = "https://fixture.invalid/example/repo.git"
+	if err := run(registered, "QTB-1-repo"); err != nil {
+		t.Fatal(err)
+	}
+	tree := filepath.Join(dir, "QTB-1-repo", "worktree")
+	if got := syndraGit(t, "-C", tree, "rev-parse", "HEAD"); got != base {
+		t.Fatalf("unexpected checkout %s", got)
+	}
+	if got := syndraGit(t, "-C", tree, "remote", "get-url", "--push", "origin"); got != "git@fixture.invalid:example/repo.git" {
+		t.Fatal(got)
+	}
+	if err := run(registered, "QTB-1-repo"); err == nil {
+		t.Fatal("overwrote a previous checkout")
+	}
+	if err := run("https://unlisted.invalid/example/repo.git", "QTB-2"); err == nil {
+		t.Fatal("accepted unregistered repository")
+	}
+	if err := run(registered, "QTB-2-repo"); err != nil {
+		t.Fatal(err)
+	}
+	if got := syndraGit(t, "-C", tree, "worktree", "list", "--porcelain"); strings.Contains(got, "QTB-2-repo") {
+		t.Fatal("bugs share Git metadata")
+	}
+	// A runtime rewrite back to HTTPS must fail closed even on the initial clone.
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "url.https://fixture.invalid/.insteadOf")
+	t.Setenv("GIT_CONFIG_VALUE_0", "git@fixture.invalid:")
+	if err := run(registered, "QTB-3"); err == nil {
+		t.Fatal("HTTPS fallback")
+	}
 }
 
 func TestFindVersionBranchesUsesLiveRemoteAndCompleteVersions(t *testing.T) {

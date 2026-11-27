@@ -1877,11 +1877,17 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	}
 	var created db.CreateCommentRow
 	var confirmedTicket db.Issue
+	var inlineDecision bool
 	var cancelledTicketTasks []db.AgentTaskQueue
 	insertComment := func(q *db.Queries) (db.CreateCommentRow, error) {
 		row, err := q.CreateComment(r.Context(), createParams)
 		if err == nil && authorType == "member" && issue.OriginType.String == externalissue.OriginType {
 			ticket, changed, applyErr := externalissue.ApplyBranchReply(r.Context(), q, issue, row.Comment())
+			if applyErr == nil && !changed && externalissue.IsInlineBranchCommand(req.Content) && externalissue.IsSyndraBug(issue) {
+				importer := h.syndraBranchImporter(q)
+				ticket, changed, applyErr = importer.ApplyInlineBranchReply(r.Context(), issue, row.Comment())
+				inlineDecision = ticket.ID.Valid
+			}
 			if applyErr != nil {
 				return row, applyErr
 			}
@@ -2014,7 +2020,9 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	// The comment is already saved; a blocked mention must not fail the whole
 	// request. Surface the per-target outcomes so the client can show partial
 	// success instead of a silent no-op (MUL-4525 §2).
-	resp.TriggerOutcomes = h.triggerTasksForComment(r.Context(), issue, comment, parentComment, authorType, authorID, originatorUserID, suppressAgentIDs, steer)
+	if !inlineDecision {
+		resp.TriggerOutcomes = h.triggerTasksForComment(r.Context(), issue, comment, parentComment, authorType, authorID, originatorUserID, suppressAgentIDs, steer)
+	}
 	if !steer.empty() {
 		applyCommentSupplements(&resp, h.listCommentSupplements(r.Context(), issue.WorkspaceID, []pgtype.UUID{comment.ID})[uuidToString(comment.ID)])
 	}

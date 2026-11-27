@@ -157,6 +157,10 @@ func NewLarkOutcomeReplier(cfg OutcomeReplierConfig) OutcomeReplier {
 // missing branch silently drops the user-visible side effect.
 func (r *LarkOutcomeReplier) Reply(ctx context.Context, inst Installation, msg InboundMessage, res DispatchResult) {
 	switch res.Outcome {
+	case Outcome(engine.OutcomeCommandReply):
+		if err := r.sendChatNotice(ctx, inst, msg, res.CommandReply); err != nil {
+			r.log.Warn("lark: verified command reply failed", "installation_id", uuidString(inst.ID), "err", err)
+		}
 	case OutcomeNeedsBinding:
 		if err := r.sendBindingPrompt(ctx, inst, msg, res); err != nil {
 			r.log.Warn("lark outcome replier: binding prompt failed",

@@ -229,7 +229,7 @@ func choiceTicket(issue db.Issue) (BranchScope, bool) {
 	return s, true
 }
 
-func (i *Importer) BranchTicket(ctx context.Context, bug db.Issue, s BranchScope, candidates []string, actorType string, actor pgtype.UUID) (db.Issue, error) {
+func (i *Importer) BranchTicket(ctx context.Context, bug db.Issue, s BranchScope, candidates []string, actorType string, actor pgtype.UUID, inline bool) (db.Issue, error) {
 	find := db.GetIssueByOriginParams{WorkspaceID: bug.WorkspaceID, OriginType: pgtype.Text{String: OriginType, Valid: true}, OriginID: s.origin()}
 	ticket, err := i.Queries.GetIssueByOrigin(ctx, find)
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -239,10 +239,15 @@ func (i *Importer) BranchTicket(ctx context.Context, bug db.Issue, s BranchScope
 	if err != nil {
 		return db.Issue{}, err
 	}
+	assignee := util.StrToText("member")
+	if inline {
+		// The shared issue is only the native wakeup anchor. The person acts on the bug.
+		member, assignee = pgtype.UUID{}, pgtype.Text{}
+	}
 	res, err := i.IssueService.Create(ctx, service.IssueCreateParams{
 		WorkspaceID: bug.WorkspaceID, ProjectID: bug.ProjectID,
 		Title: fmt.Sprintf("确认个人版本分支：%s · %d", s.Repo, s.Version), Description: util.StrToText(s.question(candidates, bug)),
-		Status: "todo", Priority: "none", AssigneeType: pgtype.Text{String: "member", Valid: true}, AssigneeID: member,
+		Status: "todo", Priority: "none", AssigneeType: assignee, AssigneeID: member,
 		CreatorType: actorType, CreatorID: actor, OriginType: find.OriginType, OriginID: find.OriginID, AllowDuplicate: true,
 	}, service.IssueCreateOpts{Platform: "external_import:syndra_branch"})
 	if isUniqueViolation(err, "idx_issue_external_origin_unique") {
@@ -270,7 +275,7 @@ func ValidBranch(branch string) bool {
 }
 
 func branchReply(content string) (kind, branch string) {
-	parts := strings.Fields(content)
+	parts := strings.Fields(strings.ReplaceAll(content, `\_`, "_"))
 	if len(parts) != 2 || !ValidBranch(parts[1]) {
 		return "", ""
 	}
@@ -282,7 +287,7 @@ func branchReply(content string) (kind, branch string) {
 }
 
 func ticketReply(ticket db.Issue, content string) (string, string) {
-	content = strings.TrimSpace(content)
+	content = strings.TrimSpace(strings.ReplaceAll(content, `\_`, "_"))
 	if ValidBranch(content) && strings.Contains(ticket.Description.String, "\n- "+content+"\n") {
 		return "默认", content
 	}
@@ -317,18 +322,30 @@ func ApplyBranchReply(ctx context.Context, q *db.Queries, issue db.Issue, c db.C
 	if kind != "默认" && kind != "更换默认" {
 		return current, false, nil
 	}
+	return saveBranchReceipt(ctx, q, current, c, kind, branch)
+}
+
+func saveBranchReceipt(ctx context.Context, q *db.Queries, current db.Issue, c db.Comment, kind, branch string) (db.Issue, bool, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(current.Metadata, &m); err != nil {
-		return issue, false, err
+		return current, false, err
 	}
 	if _, exists := m[BranchDecisionKey]; exists && kind != "更换默认" {
+		scope, _ := choiceTicket(current)
+		if old, _, err := ConfirmedBranch(ctx, q, current, scope); err == nil && old == branch && current.Status == "done" {
+			return current, false, nil
+		}
 		return current, false, fmt.Errorf("%w: 已有个人默认分支，请回复「更换默认 分支名」修改", ErrBranchInput)
 	}
-	value, _ := json.Marshal(util.UUIDToString(c.ID) + " " + branch)
-	if _, err = q.SetIssueMetadataKey(ctx, db.SetIssueMetadataKeyParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID, Key: BranchDecisionKey, Value: value}); err != nil {
-		return issue, false, err
+	receipt := util.UUIDToString(c.ID) + " " + branch
+	if c.IssueID != current.ID {
+		receipt += " " + util.UUIDToString(c.IssueID)
 	}
-	updated, err := q.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID, Status: "done"})
+	value, _ := json.Marshal(receipt)
+	if _, err := q.SetIssueMetadataKey(ctx, db.SetIssueMetadataKeyParams{ID: current.ID, WorkspaceID: current.WorkspaceID, Key: BranchDecisionKey, Value: value}); err != nil {
+		return current, false, err
+	}
+	updated, err := q.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{ID: current.ID, WorkspaceID: current.WorkspaceID, Status: "done"})
 	return updated, true, err
 }
 
@@ -348,7 +365,8 @@ func ConfirmedBranch(ctx context.Context, q *db.Queries, ticket db.Issue, s Bran
 	if json.Unmarshal(raw, &receipt) != nil {
 		return "", "", fmt.Errorf("%w: malformed confirmation receipt", ErrBranchInput)
 	}
-	id, branch, _ := strings.Cut(receipt, " ")
+	id, tail, _ := strings.Cut(receipt, " ")
+	branch, original, inline := strings.Cut(tail, " ")
 	uid, err := util.ParseUUID(id)
 	if err != nil {
 		return "", "", fmt.Errorf("%w: invalid confirmation receipt", ErrBranchInput)
@@ -361,7 +379,16 @@ func ConfirmedBranch(ctx context.Context, q *db.Queries, ticket db.Issue, s Bran
 		return "", "", err
 	}
 	kind, value := ticketReply(ticket, c.Content)
-	if c.IssueID != ticket.ID || c.AuthorType != "member" || util.UUIDToString(c.AuthorID) != s.Member || c.DeletedAt.Valid ||
+	expectedIssue := util.UUIDToString(ticket.ID)
+	if inline {
+		expectedIssue = original
+		var repo string
+		kind, repo, value = inlineChoice(c.Content)
+		if repo != "" && repo != s.Repo {
+			value = ""
+		}
+	}
+	if util.UUIDToString(c.IssueID) != expectedIssue || c.AuthorType != "member" || util.UUIDToString(c.AuthorID) != s.Member || c.DeletedAt.Valid ||
 		(kind != "默认" && kind != "更换默认") || value != branch {
 		return "", "", fmt.Errorf("%w: confirmation changed; member must post a new 更换默认 reply", ErrBranchInput)
 	}

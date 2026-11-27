@@ -13,47 +13,33 @@ multica issue syndra-branch <bug-issue-id> --repo "<credential-free-origin-url>"
 Pass one candidate flag per actual match, or none when there are none. Network failure is not an empty list. A single fuzzy match is still only a proposal. Do not change the workspace/project repo settings.
 
 - **issue_override / personal_default**: fetch the exact `refs/heads/<branch>` from the verified origin and record its commit. In the Bug thread record the response's marker verbatim on its own line, repo, version, member, branch and decision comment ID. Use the existing per-Bug worktree. A subsequent Bug with the same personal default proceeds without asking.
-- **waiting**: the command finds or creates one shared confirmation issue assigned to the member. For an assigned agent run it also registers a one-time native wakeup for this Bug when the confirmation issue reaches done (check `wakeup_id`). Before implementation, use `blocked --no-start` while the target is unknown. If a finished patch is awaiting only the assignee's target confirmation, use `in_review --no-start` and link the patch; no merge until the target is verified. In both cases leave the confirmation issue link and marker in the Bug thread. Do not send another branch question; other Bugs in this scope use the same ticket. The member replies **默认 <branch>** on that ticket, or **确认** for its sole proposal; only **更换默认 <branch>** replaces an existing default. The server records their comment and completes the confirmation issue, not the Bug.
+- **waiting**: verify `wakeup_id`. When `reply_on_bug=true`, post the marker on its own line in the original Bug, list actual candidates and mention the current human. They can comment **默认 [仓库] 分支名** here or DM the expert the returned `feishu_command` with their branch. Include the repository when several are waiting. An agent's paraphrase is never confirmation. Do not send the user to the internal anchor or ask them to mark anything done. Without this capability use the returned confirmation issue as before. Use `blocked --no-start` before implementation; for a finished patch awaiting only the owner, use `in_review --no-start` and link the diff.
 - **Only this Bug**: the member can reply **仅本单 <branch>** directly to the agent's marked comment on the original Bug. This takes precedence for that Bug and repository only. It does not complete the shared confirmation or release any other waiters. Previously confirmed, unambiguously scoped individual replies may still be used for that Bug alone; never promote old replies to a shared default.
-- **Stale target**: a successful remote lookup proving that the personal branch is gone permits repeating the command with `--missing-decision <decision_comment_id>`. Only the caller receiving `reopened=true` posts a replacement request on the shared ticket, mentioning the member and listing fresh candidates. A missing per-Bug override needs a new per-Bug reply. Never invalidate a default because of an authentication or network failure.
+- **Stale target**: only a successful lookup proving the ref absent permits `--missing-decision <decision_comment_id>`. On `reopened=true` ask the member for **更换默认 [仓库] 分支名** on the original Bug when inline replies are enabled; otherwise use the confirmation issue. A missing per-Bug override needs a new per-Bug reply. Authentication/network errors are blockers, not evidence that a branch was deleted.
 - **Changed assignee/repository/version**: on a wake, before editing, and immediately before either integration, read the current source and run the resolver again. Compare the full scope and decision to the recorded one. Never reuse another member's choice, even for this same Bug. If work/PR already exists, preserve it and report both targets for human handoff; do not automatically retarget. A run acting for a previous assignee, missing/ambiguous member, missing version ID or environment, unavailable resolver, or failed wakeup registration is a blocker; never guess a shared scope or promise a wakeup without a saved rule.
 
 Keep the source human as the branch decision and review contact. Remote branches with `_wn` or `_merge` are legitimate; do not rank by suffix or recent activity. Once the branch is established and fetched, clear stale waiting metadata. Use `in_progress --no-start` when resuming development or integration; keep `in_review` if only acceptance remains. Each Bug still starts from the fresh version tip, not the prior Bug's commit or task branch.
 
 ## Checkout and continuation
 
-For a selected workspace registry URL, use a managed checkout for discovery if no existing checkout
-is available:
+For a fresh checkout, run the bundled helper from the isolated task directory:
 
 ```bash
-multica repo checkout <repo-url>
+bash <this-skill-dir>/scripts/ssh-worktree.sh "<exact-workspace-registry-url>" "<bug-key>-<repo>"
 ```
 
-Before selecting the base, inspect status, branch/history and linked PRs. A
-clean worktree may still contain committed work from an earlier run. Only for
-a fresh discovery checkout with no work to preserve may you call:
+Use the reported worktree, not its backing clone. This helper checks the registry,
+converts a standard HTTPS URL to SSH, preserves explicit SSH ports and never
+overwrites an existing directory. Do not use generic `multica repo checkout` for
+these fixes: the daemon can substitute the registered HTTPS URL. If a custom
+SSH endpoint, host key or credential is missing, ask for it; do not disable host
+verification or configure a global URL rewrite.
 
-```bash
-multica repo checkout <repo-url> --ref refs/remotes/origin/<confirmed-version-branch>
-```
-
-Check the returned path, remote URL and `HEAD` against a fresh exact remote
-fetch. Multica can continue from cached state after fetch failure; a successful
-checkout response alone does not prove a current base. The full remote-tracking ref avoids a same-named tag or local branch. Verify
-the actual SHA and align the fresh task branch to the fetched remote commit
-if necessary.
-Never write directly on the version branch.
-
-On continuation, a managed checkout can preserve the current task branch and
-only refresh its refs. Verify HEAD and the remote before editing. Keep the
-existing branch/PR and integrate base changes there. For a new run without
-the old checkout, recover the pushed PR head into the new isolated checkout.
-Preserve unpublished work; do not use `--fresh` to select a version branch.
-
-For a native `local_directory` worktree, the runtime already created a separate
-checkout and conversation branch. Do not call `repo checkout` to recreate it.
-Check for the runtime's pending merge and prior work. Resolve a pending merge
-semantically first. If this is fresh work based on the user's unrelated HEAD,
-record that fact and realign only the isolated task branch to the confirmed
-remote version base, preserving any user changes for a separate human decision.
-Never include unrelated user changes in the bug PR.
+On the first run, after confirmation, fetch the exact remote branch over SSH,
+then create a new Bug-specific working branch at the fetched commit. Never work
+on the version branch directly. On resume, inspect status, HEAD, existing PRs
+and effective fetch/push URLs before any write; preserve commits and dirty
+files. Do not reset an existing worktree. If an older checkout has an HTTPS
+origin, preserve its work and use the equivalent verified SSH URL explicitly
+for Git transfers; do not rewrite a shared origin. Use the SSH-only worktree
+for integration and the bundled verifiers. Missing SSH access is a blocker.

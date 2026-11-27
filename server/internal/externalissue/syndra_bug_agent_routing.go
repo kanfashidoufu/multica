@@ -47,7 +47,7 @@ func IsWorkspaceBugExpert(ctx context.Context, q *db.Queries, agent db.Agent, wo
 	return false, nil
 }
 
-const bugAutomationAcceptance = "\n\n自动化验收：由工作区公用的 bug修复专家使用 multica-fixing-syndra-bugs skill。先依据工作区仓库说明和 Bug 证据定位受影响的仓库，再在各仓库的独立 worktree 修复。按当前 Syndra 人工指派人、仓库和版本解析分支：本单例外优先，否则复用本人的默认分支；未确认时共用一张分支确认单。自愈修复可直接使用 Git 提交，无需 QTB 本地提交门禁回执；仍需执行验证并遵守仓库保护规则。代码已改完且只等当前负责人确认时，将 Bug 任务设为审核中（in_review），说明待确认事项和实际合并进度。验证通过后必须取得本地验证及 CI 结果，将修复合入已确认的版本分支并推送远端，再将该版本分支合入 test 并推送远端；冲突解决后通知当前人工指派人。验证失败时提交当前修复快照到版本分支并 block 任务，通知当前人工指派人介入。仅创建 PR、进入合并队列或发布测试环境均不算完成。"
+const bugAutomationAcceptance = "\n\n自动化验收：由工作区公用的 bug修复专家使用 multica-fixing-syndra-bugs skill。先依据工作区仓库说明和 Bug 证据定位受影响的仓库，通过 SSH 拉取代码并在各仓库的独立 worktree 修复。按当前 Syndra 人工指派人、仓库和版本解析分支：本单例外优先，否则复用本人的默认分支；未确认时按分支解析器提示由本人确认；支持原 Bug 回复时，不要求本人另行结单或手动恢复。自愈修复可直接使用 Git 提交，无需 QTB 本地提交门禁回执；仍需执行验证并遵守仓库保护规则。代码已改完且只等当前负责人确认时，将 Bug 任务设为审核中（in_review），说明待确认事项和实际合并进度。验证通过后必须取得本地验证及 CI 结果，将修复合入已确认的版本分支并推送远端，再将该版本分支合入 test 并推送远端；冲突解决后通知当前人工指派人。验证失败时提交当前修复快照到版本分支并 block 任务，通知当前人工指派人介入。仅创建 PR、进入合并队列或发布测试环境均不算完成。"
 
 // The v1 sender repeats canonical fields in its optional metadata map. A
 // terminal snapshot can fill the last slot by adding solver information.
@@ -164,7 +164,8 @@ func (i *Importer) updateBugSyncMirror(ctx context.Context, existing db.Issue, r
 	}
 	var cancelled []db.AgentTaskQueue
 	var handoff db.InboxItem
-	if bugAutomationEnrolled(current.Metadata) && sourceBranchScopeChanged(current.Metadata, encoded) {
+	handoffChanged := bugAutomationEnrolled(current.Metadata) && sourceBranchScopeChanged(current.Metadata, encoded)
+	if handoffChanged {
 		cancelled, err = cancelBranchWaits(ctx, tx, current, "")
 		if err != nil {
 			return current, db.Issue{}, err
@@ -180,11 +181,32 @@ func (i *Importer) updateBugSyncMirror(ctx context.Context, existing db.Issue, r
 	if updated.AssigneeType.String == "member" && (current.AssigneeID != updated.AssigneeID || current.AssigneeType != updated.AssigneeType) {
 		i.notifyAssignee(ctx, updated, updated.AssigneeID)
 	}
+	if handoffChanged && reviewer.UserID.Valid && IsSyndraBug(updated) && metadata["bug_assignee_fallback_reason"] == nil {
+		if err := i.subscribeExpertReviewer(ctx, updated, reviewer); err != nil {
+			i.warn("Syndra reviewer subscription failed", "issue_id", util.UUIDToString(updated.ID), "error", err)
+		}
+	}
 	i.publishBranchWaitCancellation(ctx, current, cancelled)
 	if handoff.ID.Valid {
 		i.publishInboxNew(handoff, updated.Status)
 	}
 	return current, updated, nil
+}
+
+func (i *Importer) subscribeExpertReviewer(ctx context.Context, bug db.Issue, member db.Member) error {
+	ws, err := i.Queries.GetWorkspace(ctx, bug.WorkspaceID)
+	if err != nil || ws.Slug != ExpertWorkspace {
+		return err
+	}
+	visible, err := projectaccess.ForMember(ctx, i.Queries, member)
+	if err != nil || !visible.CanSeeProject(bug.ProjectID) {
+		return err
+	}
+	added, err := i.Queries.AddIssueSubscriber(ctx, db.AddIssueSubscriberParams{IssueID: bug.ID, UserType: "member", UserID: member.UserID, Reason: "assignee"})
+	if err == nil && added > 0 {
+		i.publishSubscriberAdded(bug, member.UserID)
+	}
+	return err
 }
 
 func configuredBugAutomationAssignees(raw string) map[string]struct{} {

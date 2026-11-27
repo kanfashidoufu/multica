@@ -22,6 +22,8 @@ import (
 // over unchanged.
 type Outcome string
 
+const OutcomeCommandReply Outcome = "verified_command_reply"
+
 const (
 	OutcomeDropped       Outcome = "dropped"
 	OutcomeNeedsBinding  Outcome = "needs_binding"
@@ -55,6 +57,7 @@ const (
 // consumed by the outbound side (OutboundReplier / typing). It mirrors the
 // legacy lark.DispatchResult.
 type Result struct {
+	CommandReply   string
 	Outcome        Outcome
 	DropReason     DropReason
 	InstallationID pgtype.UUID
@@ -453,15 +456,18 @@ type TypingNotifier interface {
 // optional. OriginType is the issue.origin_type label written for /issue
 // commands from this channel (Feishu: "lark_chat").
 type ResolverSet struct {
-	Installation InstallationResolver
-	Identity     IdentityResolver
-	Dedup        Deduper
-	Session      SessionBinder
-	Media        MediaResolver
-	Audit        Auditor
-	Replier      OutboundReplier
-	Typing       TypingNotifier
-	OriginType   string
+	// VerifiedCommand receives only a bound member who may invoke this bot.
+	// Empty reply leaves ordinary chat and the built-in commands unchanged.
+	VerifiedCommand func(context.Context, ResolvedInstallation, ResolvedIdentity, channel.InboundMessage) (string, error)
+	Installation    InstallationResolver
+	Identity        IdentityResolver
+	Dedup           Deduper
+	Session         SessionBinder
+	Media           MediaResolver
+	Audit           Auditor
+	Replier         OutboundReplier
+	Typing          TypingNotifier
+	OriginType      string
 }
 
 // IssueCreator is the narrow subset of service.IssueService the Router needs

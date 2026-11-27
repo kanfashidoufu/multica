@@ -39,6 +39,14 @@ type NotificationChannel interface {
 	Send(ctx context.Context, msg NotificationMessage) error
 }
 
+// Installation channels address the recipient using their own app's identity,
+// rather than the deployment-wide provider open_id in the inbox projection.
+type InstallationChannel interface {
+	NotificationChannel
+	MatchesIssue(context.Context, pgtype.UUID, pgtype.UUID) (bool, error)
+	PreferenceChannel() string
+}
+
 type Dispatcher struct {
 	queries  *db.Queries
 	cfg      Config
@@ -119,8 +127,27 @@ func (d *Dispatcher) enqueueInboxEvent(e events.Event) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	for channelName := range d.channels {
-		muted, err := d.channelMuted(ctx, workspaceID, recipientID, notifType, channelName)
+	for channelName, channel := range d.channels {
+		pref := channelName
+		if scoped, ok := channel.(InstallationChannel); ok {
+			raw, _ := item["issue_id"].(string)
+			if ptr, ok := item["issue_id"].(*string); ok && ptr != nil {
+				raw = *ptr
+			}
+			id, err := util.ParseUUID(raw)
+			if err != nil {
+				continue
+			}
+			matches, err := scoped.MatchesIssue(ctx, workspaceID, id)
+			if err != nil {
+				slog.Warn("notification scope lookup failed", "channel", channelName, "error", err)
+			}
+			if !matches || err != nil {
+				continue
+			}
+			pref = scoped.PreferenceChannel()
+		}
+		muted, err := d.channelMuted(ctx, workspaceID, recipientID, notifType, pref)
 		if err != nil {
 			slog.Warn("failed to load notification channel preference", "channel", channelName, "error", err)
 		}
@@ -182,7 +209,7 @@ func (d *Dispatcher) processDelivery(ctx context.Context, delivery db.Notificati
 		d.retryOrFail(ctx, delivery, err)
 		return
 	}
-	if !row.RecipientOpenID.Valid || strings.TrimSpace(row.RecipientOpenID.String) == "" {
+	if _, scoped := channel.(InstallationChannel); !scoped && (!row.RecipientOpenID.Valid || strings.TrimSpace(row.RecipientOpenID.String) == "") {
 		d.markFailed(ctx, delivery.ID, "recipient has no Lark open_id")
 		return
 	}

@@ -301,6 +301,7 @@ func (r *feishuOutboundReplier) Reply(ctx context.Context, inst engine.ResolvedI
 // the OutcomeReplier consumes. The Outcome/DropReason string values match 1:1.
 func dispatchResultFromEngine(res engine.Result) DispatchResult {
 	return DispatchResult{
+		CommandReply:       res.CommandReply,
 		Outcome:            Outcome(string(res.Outcome)),
 		DropReason:         DropReason(string(res.DropReason)),
 		InstallationID:     res.InstallationID,

@@ -98,10 +98,10 @@ func (c *feishuChannel) Capabilities() channel.Capability {
 }
 
 func (c *feishuChannel) installationCredentials() (InstallationCredentials, error) {
-	return installationCredentialsFor(c.inst, c.creds)
+	return c.inst.Credentials(c.creds)
 }
 
-func installationCredentialsFor(inst Installation, resolver CredentialsResolver) (InstallationCredentials, error) {
+func (inst Installation) Credentials(resolver CredentialsResolver) (InstallationCredentials, error) {
 	if resolver == nil {
 		return InstallationCredentials{}, errors.New("lark: credentials resolver missing")
 	}

@@ -409,6 +409,15 @@ func (r *Router) processClaimed(ctx context.Context, set ResolverSet, msg channe
 		}, finalizeMark, nil
 	}
 
+	if set.VerifiedCommand != nil && !startChat && !msg.ForceFresh && msg.Source.ChatType == channel.ChatTypeP2P {
+		reply, err := set.VerifiedCommand(ctx, inst, identity, msg)
+		if err != nil {
+			return Result{}, finalizeRelease, err
+		}
+		if reply != "" {
+			return Result{Outcome: OutcomeCommandReply, CommandReply: reply, InstallationID: inst.ID}, finalizeMark, nil
+		}
+	}
 	// Help is answered before resolving a Chat so it cannot alter its route,
 	// history, or pending context boundary. A consumed /new or /clear body is
 	// literal agent input, even when it starts with /help.

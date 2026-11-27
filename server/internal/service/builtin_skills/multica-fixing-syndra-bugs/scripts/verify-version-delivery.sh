@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export GIT_ALLOW_PROTOCOL=ssh GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o StrictHostKeyChecking=yes}"
 
 if [[ $# != 4 ]]; then
   echo "usage: verify-version-delivery.sh <repo-path> <version-branch> <pr-url> <validated-head-sha>" >&2

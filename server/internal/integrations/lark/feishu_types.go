@@ -109,6 +109,7 @@ const (
 // drive its outbound reply. The engine produces an engine.Result; the feishu
 // OutboundReplier adapter translates it into this shape.
 type DispatchResult struct {
+	CommandReply   string
 	Outcome        Outcome
 	DropReason     DropReason
 	InstallationID pgtype.UUID

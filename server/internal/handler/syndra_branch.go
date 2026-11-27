@@ -35,6 +35,10 @@ func ProtectSyndraBranchReceipt(next http.Handler) http.Handler {
 	})
 }
 
+func (h *Handler) syndraBranchImporter(q *db.Queries) externalissue.Importer {
+	return externalissue.Importer{Queries: q, IssueService: h.IssueService, Bus: h.Bus, Config: externalissue.Config{BugAutomationAssignees: os.Getenv("MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES")}}
+}
+
 func (h *Handler) ResolveSyndraBranch(w http.ResponseWriter, r *http.Request) {
 	bug, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
 	if !ok {
@@ -56,7 +60,7 @@ func (h *Handler) ResolveSyndraBranch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ctx := r.Context()
-	i := externalissue.Importer{Queries: h.Queries, IssueService: h.IssueService, Bus: h.Bus, Config: externalissue.Config{BugAutomationAssignees: os.Getenv("MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES")}}
+	i := h.syndraBranchImporter(h.Queries)
 	scope, err := i.BranchScope(ctx, bug, in.Repo)
 	if err != nil {
 		branchError(w, err)
@@ -105,7 +109,7 @@ func (h *Handler) ResolveSyndraBranch(w http.ResponseWriter, r *http.Request) {
 		AND p.content NOT LIKE '%[syndra-branch:%[syndra-branch:%' AND c.content LIKE '仅本单 %'
 		ORDER BY c.created_at DESC,c.id DESC LIMIT 1`, bug.WorkspaceID, bug.ID, scope.Member, scope.Marker()).Scan(&text, &id)
 	if err == nil {
-		branch := strings.TrimSpace(strings.TrimPrefix(text, "仅本单 "))
+		branch := strings.ReplaceAll(strings.TrimSpace(strings.TrimPrefix(text, "仅本单 ")), `\_`, "_")
 		if !externalissue.ValidBranch(branch) {
 			writeError(w, 409, "invalid per-issue branch; ask the current assignee to correct it")
 			return
@@ -122,7 +126,13 @@ func (h *Handler) ResolveSyndraBranch(w http.ResponseWriter, r *http.Request) {
 		branchError(w, err)
 		return
 	}
-	ticket, err := i.BranchTicket(ctx, bug, scope, in.Candidates, actorType, parseUUID(actorID))
+	ws, err := h.Queries.GetWorkspace(ctx, bug.WorkspaceID)
+	if err != nil {
+		branchError(w, err)
+		return
+	}
+	inline := ws.Slug == externalissue.ExpertWorkspace && externalissue.IsSyndraBug(bug)
+	ticket, err := i.BranchTicket(ctx, bug, scope, in.Candidates, actorType, parseUUID(actorID), inline)
 	if err != nil {
 		branchError(w, err)
 		return
@@ -136,7 +146,19 @@ func (h *Handler) ResolveSyndraBranch(w http.ResponseWriter, r *http.Request) {
 		branchError(w, err)
 		return
 	}
-	if in.MissingDecision != "" && in.MissingDecision == receipt && ticket.Status == "done" {
+	if inline && ticket.Status == "done" && branch == "" {
+		ticket, err = i.RecoverClosedBranchTicket(ctx, ticket, scope)
+		if err != nil {
+			branchError(w, err)
+			return
+		}
+		branch, receipt, err = externalissue.ConfirmedBranch(ctx, h.Queries, ticket, scope)
+		if err != nil {
+			branchError(w, err)
+			return
+		}
+	}
+	if ticket.Status == "done" && ((in.MissingDecision != "" && in.MissingDecision == receipt) || (inline && branch == "")) {
 		// Do not invalidate a replacement another member reply just committed.
 		ticket, err = h.Queries.UpdateIssue(ctx, db.UpdateIssueParams{
 			ID: ticket.ID, ExpectedRevision: pgtype.Int8{Int64: ticket.Revision, Valid: true}, Status: pgtype.Text{String: "todo", Valid: true},
@@ -164,6 +186,16 @@ func (h *Handler) ResolveSyndraBranch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result["state"] = "waiting"
+	var command string
+	if inline {
+		result["reply_on_bug"] = true
+		verb := "确认分支"
+		if branch != "" {
+			verb = "更换分支"
+		}
+		command = verb + " " + service.IssueIdentifier(ws.IssuePrefix, bug.Number) + " " + scope.Repo + " <分支名>"
+		result["feishu_command"] = command
+	}
 	if actorType == "agent" {
 		originator := h.invokeOriginatorFromRequest(r, actorType, actorID)
 		if originator == "" {
@@ -188,6 +220,12 @@ func (h *Handler) ResolveSyndraBranch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		result["wakeup_id"] = existing
+		if inline {
+			if err := i.NotifyBranchWait(ctx, bug, scope, parseUUID(existing), command, in.Candidates); err != nil {
+				branchError(w, err)
+				return
+			}
+		}
 	}
 	writeJSON(w, 200, result)
 }

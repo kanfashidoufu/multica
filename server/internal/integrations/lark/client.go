@@ -306,7 +306,9 @@ type PatchCardParams struct {
 type SendTextParams struct {
 	InstallationID InstallationCredentials
 	ChatID         ChatID
-	Text           string
+	// Direct deliveries address a member without an existing chat.
+	RecipientID, RecipientIDType, IdempotencyKey string
+	Text                                         string
 	// ReplyTarget threads the text reply back into a Lark topic; see
 	// ReplyTarget. Empty keeps the chat-level send.
 	ReplyTarget ReplyTarget

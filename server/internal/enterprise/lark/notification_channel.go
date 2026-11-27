@@ -269,6 +269,32 @@ func notificationSubject(msg notifications.NotificationMessage) string {
 	}
 }
 
+// NotificationText shares the unified channel's terminology with app-scoped
+// plain-text notifications while leaving room for an actionable branch prompt.
+func NotificationText(msg notifications.NotificationMessage) string {
+	parts := []string{msg.IssueIdentifier + " · " + msg.Title}
+	switch msg.Type {
+	case "agent_blocked":
+		parts = append(parts, "需要你处理")
+	case "review_requested":
+		parts = append(parts, "请审核修复结果")
+	case "status_changed":
+		parts = append(parts, "任务状态已更新")
+	default:
+		parts = append(parts, notificationSubject(msg))
+	}
+	if msg.IssueStatus != "" {
+		parts = append(parts, "当前状态："+issueStatusLabel(msg.IssueStatus))
+	}
+	if body := strings.TrimSpace(msg.Body); body != "" {
+		parts = append(parts, truncateRunes(body, 1800))
+	}
+	if msg.URL != "" {
+		parts = append(parts, msg.URL)
+	}
+	return strings.Join(parts, "\n")
+}
+
 func cardTemplate(msg notifications.NotificationMessage) string {
 	switch msg.Type {
 	case "task_failed":
