@@ -225,7 +225,7 @@ Syndra 通过 `POST /api/webhooks/external-issues` 推送 Bug 或小需求事件
 |---|---|---|
 | `MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN` | 空 | 同步接口要求的共享密钥。请求必须带 `Authorization: Bearer <token>`；不设置时返回 `503 external issue sync is not configured` |
 | `MULTICA_EXTERNAL_BUG_WORKSPACE_ID` | 空 | `sync_type=bug` 固定使用的 Bug 工作区 ID；不接受请求覆盖 |
-| `MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES` | `王宁` | 允许自动修复的 Syndra 负责人姓名，以英文逗号分隔。符合条件的新 Bug 指派给工作区公用智能体 `bug修复专家`。 |
+| `MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES` | `王宁` | 允许自动修复的 Syndra 负责人姓名，以英文逗号分隔。新 Bug 和再次同步的待修旧 Bug 在符合条件时指派给工作区公用智能体 `bug修复专家`。 |
 | `MULTICA_EXTERNAL_REQUIREMENT_WORKSPACE_ID` | 空 | `sync_type=requirement` 固定使用的小需求工作区 ID；不接受请求覆盖，确保与 Bug 工作区隔离 |
 
 Syndra Bug 同步（`sync_type=bug`）的 v1 保留原成员匹配逻辑；生产 v2 按字符串 `syndra_user_id` 核验飞书身份，符合准入条件时自动开户并免邀请入组。不能核验时由 Bug 工作区 owner 承接。小需求同步使用 `sync_type=requirement`，由请求中的 `executor_id` 指派 Multica 智能体，并使用该智能体的负责人作为 issue 创建人；旧默认工作区、默认负责人环境变量和飞书多维表格参数不再支持。

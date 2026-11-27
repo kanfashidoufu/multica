@@ -844,9 +844,8 @@ RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, c
 
 // Cancels every active task on the issue and returns the affected rows so the
 // caller can reconcile each agent's status and broadcast task:cancelled events
-// (#1587). Prior :exec form silently dropped that info, leaving agents stuck at
-// status="working" with no self-correction. Only issue-deletion cleanup calls
-// this now; a status flip to cancelled/done no longer does (MUL-4465).
+// (#1587). Explicit issue cleanup and Syndra terminal webhooks use this;
+// a plain Multica status flip must not stop runs (MUL-4465).
 func (q *Queries) CancelAgentTasksByIssue(ctx context.Context, issueID pgtype.UUID) ([]AgentTaskQueue, error) {
 	rows, err := q.db.Query(ctx, cancelAgentTasksByIssue, issueID)
 	if err != nil {
@@ -4895,6 +4894,25 @@ func (q *Queries) HasActiveTaskForIssueAndAgentInThread(ctx context.Context, arg
 	var has_active bool
 	err := row.Scan(&has_active)
 	return has_active, err
+}
+
+const hasConflictingBugRepairTask = `-- name: HasConflictingBugRepairTask :one
+SELECT EXISTS (SELECT 1 FROM agent_task_queue WHERE issue_id = $1
+    AND (agent_id = $2::uuid OR status IN ('queued','dispatched','running','waiting_local_directory','deferred')))
+`
+
+type HasConflictingBugRepairTaskParams struct {
+	IssueID               pgtype.UUID `json:"issue_id"`
+	AlreadyAssignedExpert pgtype.UUID `json:"already_assigned_expert"`
+}
+
+// Pass already_assigned_expert only if this expert currently owns the issue.
+// An old run by a previous owner is history, not a live claim.
+func (q *Queries) HasConflictingBugRepairTask(ctx context.Context, arg HasConflictingBugRepairTaskParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasConflictingBugRepairTask, arg.IssueID, arg.AlreadyAssignedExpert)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const hasPendingTaskForIssue = `-- name: HasPendingTaskForIssue :one

@@ -664,9 +664,8 @@ WHERE id = sqlc.arg(task_id)
 -- name: CancelAgentTasksByIssue :many
 -- Cancels every active task on the issue and returns the affected rows so the
 -- caller can reconcile each agent's status and broadcast task:cancelled events
--- (#1587). Prior :exec form silently dropped that info, leaving agents stuck at
--- status="working" with no self-correction. Only issue-deletion cleanup calls
--- this now; a status flip to cancelled/done no longer does (MUL-4465).
+-- (#1587). Explicit issue cleanup and Syndra terminal webhooks use this;
+-- a plain Multica status flip must not stop runs (MUL-4465).
 UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
@@ -1757,6 +1756,12 @@ FOR UPDATE;
 -- Returns true if the issue has any task in any status. Webhook recovery
 -- treats even a terminal task as proof that ownership moved downstream.
 SELECT EXISTS (SELECT 1 FROM agent_task_queue WHERE issue_id = $1);
+
+-- name: HasConflictingBugRepairTask :one
+-- Pass already_assigned_expert only if this expert currently owns the issue.
+-- An old run by a previous owner is history, not a live claim.
+SELECT EXISTS (SELECT 1 FROM agent_task_queue WHERE issue_id = @issue_id
+    AND (agent_id = sqlc.narg('already_assigned_expert')::uuid OR status IN ('queued','dispatched','running','waiting_local_directory','deferred')));
 
 -- name: HasActiveTaskForIssue :one
 -- Returns true if there is any queued, dispatched, waiting_local_directory,

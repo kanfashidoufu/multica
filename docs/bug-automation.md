@@ -16,15 +16,14 @@ Syndra 导入 → 名单成员匹配与工作区公用专家选择 → 写入证
 
 | 位置 | 职责 |
 | --- | --- |
-| `server/internal/externalissue/importer.go` | 复用当前 Bug 工作区、成员解析及镜像更新；仅新建流程接入派发；对已接入试运行的任务保留交付状态 |
+| `server/internal/externalissue/importer.go` | 新建及更新推送共用白名单派发和状态同步规则 |
 | `server/internal/externalissue/syndra_bug_agent_routing.go` | 试运行名单、工作区公用 bug修复专家选择、成员责任归属、入队失败恢复及局部同步规则 |
 | `server/internal/service/builtin_skills/multica-fixing-syndra-bugs/` | 分支证据、人工介入、工作恢复、最小修复、版本集成、`test` 推进和交付验证 |
 | `server/internal/service/syndra_bug_skill_test.go` | 临时 Git 远端与模拟 GitHub CLI 的可执行验证；不调用真实智能体或实际 PR |
 | `server/internal/externalissue/*test.go` | 试运行范围、原有成员回退、责任人、重复同步及失败恢复 |
 
 内部标记 `multica_bug_automation` 由 importer 设置，源系统不能通过 metadata
-开启它。普通 Bug 的指派人按 Syndra 快照同步；已接入自愈的任务保留执行智能体和 Multica 状态，Syndra 原状态仍写入
-原有 `bug_status` 字段。不会根据旧任务的名字或当前负责人追补启动历史任务。
+开启它。Syndra 原状态写入 `bug_status`。只有再次收到推送，仍待修复且无人执行的旧 Bug 才按白名单接管；不批量重跑历史。源端明确已解决或已关闭时，无论是否自愈，Multica 都将对应任务设为已完成并停止其在途运行，其余任务不受影响。
 试运行成员通过 `MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES` 配置为逗号分隔的精确姓名；
 未配置时保持默认名单 `王宁`，因此扩展测试人员只需改部署环境变量，不需要修改 importer 或 Skill。
 
@@ -35,7 +34,7 @@ Syndra 导入 → 名单成员匹配与工作区公用专家选择 → 写入证
 - `server/internal/daemon/execenv/runtime_config_sections.go`：任务交付进入 `in_review`，`done` 保留人工；CI 结果属于显式验收时允许前台等待。本轮仅在试运行任务描述里添加这项验收，不改运行时规则。
 - `server/internal/daemon/prompt.go`：当前任务、根评论摘要、相关线程和触发回复的读取与恢复。
 - `server/internal/daemon/repocache/cache.go`：checkout 可能在 fetch 失败后使用缓存；重复 checkout 可能清理工作。因此分支发现查实际远端，继续运行时保护已有工作。
-- `server/internal/service/task.go`：`EnqueueTaskForIssueByActor` 保持原负责成员为运行责任人，无需旧 handoff 接口或自建队列。
+- `server/internal/service/task.go`：改派与入队在同一事务提交，复用现有队列和人工责任归属。
 - [GitHub CLI 合并命令](https://cli.github.com/manual/gh_pr_merge)：`--match-head-commit` 限制请求的 PR head；队列接纳或启用 auto-merge 不是合并完成。
 
 这些开发证据留在仓库文档，不随 skill 下发，避免让目标仓库的智能体查找不存在的

@@ -450,7 +450,7 @@ Syndra が `POST /api/webhooks/external-issues` に Bug または小規模要件
 |---|---|---|
 | `MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN` | 空 | 同期エンドポイントで必須の共有 secret。リクエストは `Authorization: Bearer <token>` を送信する必要があります。未設定の場合、エンドポイントは `503 external issue sync is not configured` を返します |
 | `MULTICA_EXTERNAL_BUG_WORKSPACE_ID` | 空 | `sync_type=bug` 専用の workspace id。リクエストからは上書きできません |
-| `MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES` | `王宁` | 自動修復の対象となる Syndra 担当者名（カンマ区切りの完全一致）。条件を満たす新しい Bug はワークスペース全員が呼び出せる `bug修复专家` に割り当てられます。 |
+| `MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES` | `王宁` | 自動修復の対象となる Syndra 担当者名（カンマ区切りの完全一致）。新規 Bug および再同期時に修復が必要な既存の Bug は、条件を満たす場合にワークスペース全員が呼び出せる `bug修复专家` に割り当てられます。 |
 | `MULTICA_EXTERNAL_REQUIREMENT_WORKSPACE_ID` | 空 | `sync_type=requirement` 専用の workspace id。リクエストからは上書きできず、要件と Bug の workspace を分離します |
 
 Syndra Bug 同期（`sync_type=bug`）の v1 は従来のメンバー照合を維持します。運用環境の v2 は文字列 `syndra_user_id` と Feishu の ID を照合し、条件を満たせば招待なしでアカウントとメンバーシップを作成します。確認できない場合はワークスペースのオーナーが担当します。小規模要件同期は `sync_type=requirement` を使用し、`executor_id` の Multica Agent を割り当て、その Agent の owner を issue creator として記録します。旧デフォルト workspace/assignee 変数と Feishu Base パラメータはサポートされません。

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -63,8 +64,8 @@ func TestBugAutomationMirrorPreservesOnlyEnrolledDeliveryState(t *testing.T) {
 	for _, enrolled := range []bool{false, true} {
 		for _, currentStatus := range []string{"blocked", "in_progress", "in_review", "done"} {
 			existingMetadata, _ := json.Marshal(map[string]any{bugAutomationMetadataKey: enrolled})
-			metadata := map[string]any{bugAutomationMetadataKey: true, "bug_status": "resolved"}
-			description, status, raw, err := bugAutomationMirror(db.Issue{Status: currentStatus, Metadata: existingMetadata}, "source", "done", metadata)
+			metadata := map[string]any{bugAutomationMetadataKey: true, "bug_status": "active"}
+			description, status, raw, err := bugAutomationMirror(db.Issue{Status: currentStatus, Metadata: existingMetadata}, "source", bugSyncState{status: "todo"}, metadata)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -76,7 +77,7 @@ func TestBugAutomationMirrorPreservesOnlyEnrolledDeliveryState(t *testing.T) {
 				if status != currentStatus || got[bugAutomationMetadataKey] != true || !strings.Contains(description, bugAutomationAcceptance) {
 					t.Fatalf("enrolled mirror lost delivery state: %s %s %s", status, description, raw)
 				}
-			} else if status != "done" || description != "source" || got[bugAutomationMetadataKey] != nil {
+			} else if status != "todo" || description != "source" || got[bugAutomationMetadataKey] != nil {
 				t.Fatalf("source metadata enrolled an ordinary bug: %s %s %s", status, description, raw)
 			}
 		}
@@ -89,13 +90,13 @@ func TestBugAutomationMirrorDoesNotOverflowMetadata(t *testing.T) {
 		metadata[fmt.Sprintf("key_%d", n)] = "value"
 	}
 	existing := db.Issue{Status: "blocked", Metadata: []byte(`{"multica_bug_automation":true}`)}
-	if _, _, _, err := bugAutomationMirror(existing, "source", "done", metadata); err == nil {
+	if _, _, _, err := bugAutomationMirror(existing, "source", bugSyncState{status: "todo"}, metadata); err == nil {
 		t.Fatal("full mirror must not erase enrollment or exceed metadata capacity")
 	}
 	delete(metadata, "key_0")
 	delete(metadata, "key_1")
 	metadata["source"], metadata["external_source"] = "syndra", "syndra"
-	_, status, _, err := bugAutomationMirror(existing, "source", "done", metadata)
+	_, status, _, err := bugAutomationMirror(existing, "source", bugSyncState{status: "todo"}, metadata)
 	if err != nil || status != "blocked" || len(metadata) != maxBugMetadataKeys || metadata[bugAutomationMetadataKey] != true || metadata["external_source"] != "syndra" {
 		t.Fatalf("failed to preserve enrollment on full Syndra snapshot: %v", err)
 	}
@@ -157,7 +158,7 @@ func TestBugAutomationImportPilotAndRepeatedSync(t *testing.T) {
 			}
 			// The importer found the row before the agent blocked it. The update
 			// must use the locked current state rather than that old snapshot.
-			previous, mirrored, err := importer.updateBugSyncMirror(ctx, issue, db.Member{UserID: pilot.User.ID}, issue.Title, "source", "done", issue.Priority, map[string]any{"external_source": "syndra"})
+			previous, mirrored, err := importer.updateBugSyncMirror(ctx, issue, bugDeveloperAssignment{Reviewer: db.Member{UserID: pilot.User.ID}}, issue.Title, "source", bugSyncState{status: "done"}, issue.Priority, map[string]any{"external_source": "syndra"})
 			if err != nil || previous.Status != "blocked" || mirrored.Status != "blocked" {
 				t.Fatalf("stale snapshot overwrote agent state: %s %s %v", previous.Status, mirrored.Status, err)
 			}
@@ -167,11 +168,11 @@ func TestBugAutomationImportPilotAndRepeatedSync(t *testing.T) {
 				t.Fatal(err)
 			}
 			updated := result.Items[0].Issue
-			if !result.Items[0].Existing || updated.Status != "blocked" || updated.AssigneeID != pilotAgent.ID || strings.Count(updated.Description.String, bugAutomationAcceptance) != 1 {
-				t.Fatal("upsert overwrote pending version integration")
+			if !result.Items[0].Existing || updated.Status != "done" || updated.AssigneeID != pilotAgent.ID || strings.Count(updated.Description.String, bugAutomationAcceptance) != 1 {
+				t.Fatal("resolved Syndra bug must complete the enrolled issue")
 			}
 			queued, err = q.ListTasksByIssue(ctx, issue.ID)
-			if err != nil || len(queued) != 1 {
+			if err != nil || len(queued) != 1 || queued[0].Status != "cancelled" {
 				t.Fatalf("upsert duplicated task: %d %v", len(queued), err)
 			}
 		})
@@ -200,9 +201,87 @@ func TestBugAgentEnqueueFailureReturnsBugToHuman(t *testing.T) {
 	}
 	bus := events.New()
 	importer := &Importer{Queries: q, IssueService: service.NewIssueService(q, pool, bus, analytics.NoopClient{}, service.NewTaskService(q, pool, nil, bus))}
-	result, err := importer.routeNewBugToDeveloperAgent(ctx, issue, bugDeveloperAssignment{Reviewer: db.Member{UserID: fx.User.ID}, DeveloperAgentID: parse(agentID)})
+	result, err := importer.routeBugToExpert(ctx, issue, bugDeveloperAssignment{Reviewer: db.Member{UserID: fx.User.ID}, DeveloperAgentID: parse(agentID)})
 	if err == nil || result.AssigneeID != fx.User.ID || result.AssigneeType.String != "member" {
 		t.Fatalf("failed enqueue abandoned bug on agent: %v %v", result.AssigneeType, err)
+	}
+}
+
+func TestSyndraLegacyBugRoutingOnUpsert(t *testing.T) {
+	ctx := t.Context()
+	pool := openTestPool(t, ctx)
+	q := db.New(pool)
+	fx := createImporterFixture(t, ctx, pool, q)
+	human := createImporterWorkspaceMember(t, ctx, pool, q, fx.Workspace.ID, "凌情", "")
+	f := dbfx.New(pool, util.UUIDToString(fx.Workspace.ID), util.UUIDToString(human.User.ID))
+	personal := createImporterOwnedAgent(t, ctx, pool, q, fx.Workspace.ID, human.User.ID, "个人助手")
+	expert := createImporterSharedExpert(t, ctx, pool, q, fx.Workspace.ID, fx.User.ID)
+	bus := events.New()
+	i := &Importer{Queries: q, IssueService: service.NewIssueService(q, pool, bus, analytics.NoopClient{}, service.NewTaskService(q, pool, nil, bus)), Bus: bus, Config: Config{WebhookToken: "fixture", BugWorkspaceID: f.WorkspaceID}}
+	for _, tc := range []struct {
+		name, local, source, oldRun string
+		migrate                     bool
+	}{
+		{"closed source while waiting for branch", "blocked", "closed", "completed", false},
+		{"closed source with local unfinished delivery", "in_progress", "closed", "completed", false},
+		{"open bug with an idle legacy executor", "todo", "active", "completed", true},
+		{"unlisted owner", "todo", "active", "completed", false},
+		{"legacy run still running", "in_progress", "active", "running", false},
+		{"deferred legacy run", "todo", "active", "deferred", false},
+		{"waiting for review", "in_review", "active", "completed", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			i.Config.BugAutomationAssignees = "凌情"
+			if tc.name == "unlisted owner" {
+				i.Config.BugAutomationAssignees = "王宁"
+			}
+			key := "test:" + tc.name
+			id := f.Issue(t, tc.name, dbfx.Cols{"origin_type": OriginType, "origin_id": sourceOriginID("syndra", "prod", "version_bug", key), "status": tc.local, "metadata": []byte(`{"multica_bug_automation":true,"bug_assignee_name":"凌情","sync_source_env":"prod","bug_version_id":42}`), "assignee_type": "agent", "assignee_id": personal.ID})
+			old := f.Task(t, util.UUIDToString(personal.ID), dbfx.Cols{"runtime_id": personal.RuntimeID, "issue_id": id, "status": tc.oldRun})
+			req := BugSyncRequest{Payload: BugSyncPayload{Source: "syndra", SourceEnv: "prod", Items: []BugSyncItem{{BugID: 42, ExternalKey: key, VersionID: 42, Title: "Bug", Status: tc.source, Assignee: BugSyncPerson{Name: strPtr("凌情")}}}}}
+			// Two webhook workers may deliver the same active source snapshot.
+			type outcome struct {
+				res BugSyncResult
+				err error
+			}
+			results := make(chan outcome, 2)
+			for j := 0; j < 2; j++ {
+				go func() { res, err := i.ImportBugSync(ctx, req); results <- outcome{res, err} }()
+			}
+			for j := 0; j < 2; j++ {
+				got := <-results
+				res, err := got.res, got.err
+				if err != nil {
+					t.Fatal(err)
+				}
+				issue := res.Items[0].Issue
+				want := personal.ID
+				if tc.migrate {
+					want = expert.ID
+				}
+				var m map[string]any
+				if err := json.Unmarshal(issue.Metadata, &m); err != nil {
+					t.Fatal(err)
+				}
+				wantStatus := tc.local
+				if tc.source == "closed" {
+					wantStatus = "done"
+				}
+				if issue.AssigneeID != want || issue.Status != wantStatus || m["bug_status"] != tc.source || !res.Items[0].Existing {
+					t.Fatalf("wrong mirror or route: agent=%s local=%s source=%v", util.UUIDToString(issue.AssigneeID), issue.Status, m["bug_status"])
+				}
+			}
+			wantCount := 0
+			if tc.migrate {
+				wantCount = 1
+			}
+			if n := f.Count(t, "SELECT count(*) FROM agent_task_queue WHERE issue_id=$1 AND agent_id=$2", id, expert.ID); n != wantCount {
+				t.Fatalf("expert runs=%d want=%d", n, wantCount)
+			}
+			if n := f.Count(t, "SELECT count(*) FROM agent_task_queue WHERE id=$1 AND status=$2 AND agent_id=$3", old, tc.oldRun, personal.ID); n != 1 {
+				t.Fatal("legacy run changed")
+			}
+		})
 	}
 }
 
@@ -231,4 +310,50 @@ func TestBugRoutingRequiresWorkspaceGrantForNamedExpert(t *testing.T) {
 	count(1)
 	f.Exec(t, "UPDATE agent SET runtime_id=NULL WHERE id=$1", expert.ID)
 	count(0)
+}
+
+func TestSyndraIdleMemberBugHandoffRollsBackIfEnqueueFails(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("requires isolated PostgreSQL database")
+	}
+	pool := dbfx.IsolatedDB(t, dsn)
+	q := db.New(pool)
+	ctx := t.Context()
+	fx := createImporterFixture(t, ctx, pool, q)
+	human := createImporterWorkspaceMember(t, ctx, pool, q, fx.Workspace.ID, "试用负责人", "")
+	f := dbfx.New(pool, util.UUIDToString(fx.Workspace.ID), util.UUIDToString(human.User.ID))
+	expert := createImporterSharedExpert(t, ctx, pool, q, fx.Workspace.ID, fx.User.ID)
+	bus := events.New()
+	i := Importer{Queries: q, Bus: bus, IssueService: service.NewIssueService(q, pool, bus, analytics.NoopClient{}, service.NewTaskService(q, pool, nil, bus)), Config: Config{WebhookToken: "test", BugWorkspaceID: f.WorkspaceID}}
+	req := BugSyncRequest{Payload: BugSyncPayload{Source: "syndra", SourceEnv: "test", Items: []BugSyncItem{{BugID: 32, EntityType: "version_bug", Title: "waiting for enrollment", Status: "active", Assignee: BugSyncPerson{Name: strPtr("试用负责人")}}}}}
+	r, err := i.ImportBugSync(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := r.Items[0].Issue.ID
+	if r.Items[0].Issue.AssigneeID != human.User.ID || f.Count(t, "SELECT count(*) FROM agent_task_queue WHERE issue_id=$1", id) != 0 {
+		t.Fatal("unlisted member dispatched")
+	}
+	i.Config.BugAutomationAssignees = "试用负责人"
+	// Fail the native queue INSERT *after* the assignment callback has run.
+	f.Exec(t, `CREATE FUNCTION reject_test_enqueue() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test enqueue rejected'; END; $$`)
+	f.Exec(t, "CREATE TRIGGER reject_test_enqueue BEFORE INSERT ON agent_task_queue FOR EACH ROW EXECUTE FUNCTION reject_test_enqueue()")
+	if _, err := i.ImportBugSync(ctx, req); err == nil {
+		t.Fatal("expected enqueue failure")
+	}
+	saved, err := q.GetIssue(ctx, id)
+	if err != nil || saved.AssigneeType.String != "member" || saved.AssigneeID != human.User.ID || bugAutomationEnrolled(saved.Metadata) || strings.Contains(saved.Description.String, bugAutomationAcceptance) || f.Count(t, "SELECT count(*) FROM agent_task_queue WHERE issue_id=$1", id) != 0 {
+		t.Fatalf("partial handoff after rejected enqueue: %v", err)
+	}
+	f.Exec(t, "DROP TRIGGER reject_test_enqueue ON agent_task_queue")
+	for j := 0; j < 2; j++ {
+		r, err = i.ImportBugSync(ctx, req)
+		if err != nil || !r.Items[0].Existing || r.Items[0].Issue.AssigneeID != expert.ID || !bugAutomationEnrolled(r.Items[0].Issue.Metadata) {
+			t.Fatalf("retry did not hand off old member bug: %v", err)
+		}
+	}
+	if f.Count(t, "SELECT count(*) FROM agent_task_queue WHERE issue_id=$1 AND agent_id=$2 AND accountable_user_id=$3", id, expert.ID, human.User.ID) != 1 {
+		t.Fatal("expected exactly one owned expert run")
+	}
 }

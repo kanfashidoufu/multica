@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/projectaccess"
+	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -70,11 +71,18 @@ func hasBugAutomationSlot(metadata map[string]any) bool {
 			return true
 		}
 	}
+	// Both fields are stamped from the same structured provider. Keep the
+	// source key when a dense snapshot has no other redundant aliases.
+	if source, ok := metadata["external_source"].(string); ok && source != "" && metadata["external_provider"] == source {
+		delete(metadata, "external_provider")
+		return true
+	}
 	return false
 }
 
-// An upstream 'resolved' event is not proof the automated fix reached its version branch.
-func bugAutomationMirror(existing db.Issue, description, status string, metadata map[string]any) (string, string, []byte, error) {
+// Nonterminal snapshots preserve the enrolled issue's local delivery stage.
+func bugAutomationMirror(existing db.Issue, description string, source bugSyncState, metadata map[string]any) (string, string, []byte, error) {
+	status := source.status
 	delete(metadata, bugAutomationMetadataKey)
 	var previous map[string]any
 	if err := json.Unmarshal(existing.Metadata, &previous); err != nil {
@@ -86,7 +94,9 @@ func bugAutomationMirror(existing db.Issue, description, status string, metadata
 		}
 		metadata[bugAutomationMetadataKey] = true
 		description += bugAutomationAcceptance
-		status = existing.Status
+		if !source.terminalBySyndra {
+			status = existing.Status
+		}
 	}
 	encoded, err := json.Marshal(metadata)
 	return description, status, encoded, err
@@ -94,7 +104,8 @@ func bugAutomationMirror(existing db.Issue, description, status string, metadata
 
 // Reuse the existing issue-row lock so a concurrent agent status update cannot
 // be overwritten by the older snapshot used to locate an imported issue.
-func (i *Importer) updateBugSyncMirror(ctx context.Context, existing db.Issue, reviewer db.Member, title, description, status, priority string, metadata map[string]any) (db.Issue, db.Issue, error) {
+func (i *Importer) updateBugSyncMirror(ctx context.Context, existing db.Issue, assignment bugDeveloperAssignment, title, description string, source bugSyncState, priority string, metadata map[string]any) (db.Issue, db.Issue, error) {
+	reviewer := assignment.Reviewer
 	tx, err := i.IssueService.TxStarter.Begin(ctx)
 	if err != nil {
 		return existing, db.Issue{}, err
@@ -129,7 +140,7 @@ func (i *Importer) updateBugSyncMirror(ctx context.Context, existing db.Issue, r
 		metadata["bug_assignee_email_candidate"] == nil && len(metadata) < maxBugMetadataKeys {
 		metadata["bug_assignee_email_candidate"] = last.Candidate
 	}
-	description, status, encoded, err := bugAutomationMirror(current, description, status, metadata)
+	description, status, encoded, err := bugAutomationMirror(current, description, source, metadata)
 	if err != nil {
 		return current, db.Issue{}, err
 	}
@@ -142,7 +153,8 @@ func (i *Importer) updateBugSyncMirror(ctx context.Context, existing db.Issue, r
 	}
 	// Enrolled issues keep their execution owner; the source human is mirrored
 	// in metadata and drives branch confirmation and review handoff.
-	if !bugAutomationEnrolled(current.Metadata) && reviewer.UserID.Valid &&
+	repairable := assignment.DeveloperAgentID.Valid && bugStatusStartsDevelopment(source.status) && bugStatusStartsDevelopment(status) && i.IssueService.TaskService != nil
+	if !bugAutomationEnrolled(current.Metadata) && reviewer.UserID.Valid && !(repairable && current.AssigneeType.String == "agent") &&
 		(current.AssigneeID != reviewer.UserID || current.AssigneeType.String != "member") {
 		hidden, err := projectaccess.ForMember(ctx, q, reviewer)
 		if err != nil {
@@ -164,8 +176,29 @@ func (i *Importer) updateBugSyncMirror(ctx context.Context, existing db.Issue, r
 	}
 	var cancelled []db.AgentTaskQueue
 	var handoff db.InboxItem
-	handoffChanged := bugAutomationEnrolled(current.Metadata) && sourceBranchScopeChanged(current.Metadata, encoded)
-	if handoffChanged {
+	handoffChanged := !source.terminalBySyndra && bugAutomationEnrolled(current.Metadata) && sourceBranchScopeChanged(current.Metadata, encoded)
+	if source.terminalBySyndra {
+		// This source command stops work, unlike an ordinary Multica status edit.
+		// Settle the cancellations in the same transaction as the mirror write.
+		if err = q.DisableIssueWakeups(ctx, updated.ID); err != nil {
+			return current, db.Issue{}, err
+		}
+		cancelled, err = q.CancelAgentTasksByIssue(ctx, updated.ID)
+		if err != nil {
+			return current, db.Issue{}, err
+		}
+		for _, task := range cancelled {
+			if !task.StartedAt.Valid {
+				continue
+			}
+			if err = q.MarkPiTaskProcessCleanupPending(ctx, task.ID); err != nil {
+				return current, db.Issue{}, err
+			}
+		}
+		if err = service.SettleTerminalTaskState(ctx, q, cancelled...); err != nil {
+			return current, db.Issue{}, err
+		}
+	} else if handoffChanged {
 		cancelled, err = cancelBranchWaits(ctx, tx, current, "")
 		if err != nil {
 			return current, db.Issue{}, err
@@ -174,6 +207,13 @@ func (i *Importer) updateBugSyncMirror(ctx context.Context, existing db.Issue, r
 		if err != nil {
 			return current, db.Issue{}, err
 		}
+	}
+	if repairable {
+		busy, err := q.HasConflictingBugRepairTask(ctx, bugRepairConflict(updated, assignment.DeveloperAgentID))
+		if err != nil {
+			return current, db.Issue{}, err
+		}
+		repairable = !busy
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return current, db.Issue{}, err
@@ -186,9 +226,24 @@ func (i *Importer) updateBugSyncMirror(ctx context.Context, existing db.Issue, r
 			i.warn("Syndra reviewer subscription failed", "issue_id", util.UUIDToString(updated.ID), "error", err)
 		}
 	}
-	i.publishBranchWaitCancellation(ctx, current, cancelled)
+	i.publishCancelledBugTasks(ctx, current, cancelled)
+	if source.terminalBySyndra && (current.Status != updated.Status || len(cancelled) > 0) {
+		i.info("external bug sync: source ended issue", "issue_id", util.UUIDToString(updated.ID), "source_status", metadata["bug_status"], "cancelled_runs", len(cancelled))
+	}
 	if handoff.ID.Valid {
 		i.publishInboxNew(handoff, updated.Status)
+	}
+	if repairable {
+		routed, routeErr := i.routeBugToExpert(ctx, updated, assignment)
+		if routeErr != nil {
+			return current, updated, fmt.Errorf("route synchronized bug to expert: %w", routeErr)
+		}
+		if routed.AssigneeID == assignment.DeveloperAgentID && routed.AssigneeType.String == "agent" && !handoffChanged {
+			if err := i.subscribeExpertReviewer(ctx, routed, reviewer); err != nil {
+				i.warn("Syndra reviewer subscription failed", "issue_id", util.UUIDToString(routed.ID), "error", err)
+			}
+		}
+		updated = routed
 	}
 	return current, updated, nil
 }
@@ -296,82 +351,75 @@ func (i *Importer) resolveBugDeveloperAssignmentForItem(
 	return assignment
 }
 
-// routeNewBugToDeveloperAgentIfEligible is intentionally scoped to new Syndra
-// issues. The caller stamps the complete external metadata first; only then
-// does this helper reassign and enqueue the issue. This keeps the localized
-// workflow out of the shared IssueService and sqlc create contracts.
-func (i *Importer) routeNewBugToDeveloperAgentIfEligible(
-	ctx context.Context,
-	issue db.Issue,
-	assignment bugDeveloperAssignment,
-	status string,
-) db.Issue {
-	if !assignment.DeveloperAgentID.Valid || !bugStatusStartsDevelopment(status) || !bugAutomationEnrolled(issue.Metadata) {
-		return issue
+var errBugRouteChanged = errors.New("bug no longer needs expert dispatch")
+
+func bugRepairConflict(issue db.Issue, expert pgtype.UUID) db.HasConflictingBugRepairTaskParams {
+	p := db.HasConflictingBugRepairTaskParams{IssueID: issue.ID}
+	if issue.AssigneeType.String == "agent" && issue.AssigneeID == expert {
+		p.AlreadyAssignedExpert = expert
 	}
-	updated, err := i.routeNewBugToDeveloperAgent(ctx, issue, assignment)
-	if err != nil {
-		i.warn("external bug sync: developer agent routing failed",
-			"issue_id", util.UUIDToString(issue.ID),
-			"reviewer_id", util.UUIDToString(assignment.Reviewer.UserID),
-			"developer_agent_id", util.UUIDToString(assignment.DeveloperAgentID),
-			"error", err,
-		)
-	}
-	return updated
+	return p
 }
 
-func (i *Importer) routeNewBugToDeveloperAgent(
-	ctx context.Context,
-	issue db.Issue,
-	assignment bugDeveloperAssignment,
-) (db.Issue, error) {
-	if i.IssueService == nil || i.IssueService.TaskService == nil {
-		return issue, errors.New("task service unavailable")
-	}
-
-	updated, err := i.Queries.UpdateIssue(ctx, db.UpdateIssueParams{
-		ID:            issue.ID,
-		AssigneeType:  pgtype.Text{String: "agent", Valid: true},
-		AssigneeID:    assignment.DeveloperAgentID,
-		StartDate:     issue.StartDate,
-		DueDate:       issue.DueDate,
-		ParentIssueID: issue.ParentIssueID,
-		ProjectID:     issue.ProjectID,
-		Stage:         issue.Stage,
-	})
-	if err != nil {
-		return issue, fmt.Errorf("assign developer agent: %w", err)
-	}
-	i.publishExternalIssueUpdated(ctx, issue, updated, "external_bug_agent_routing")
-
-	if _, err := i.IssueService.TaskService.EnqueueTaskForIssueByActor(
-		ctx,
-		updated,
-		assignment.Reviewer.UserID,
-	); err != nil {
-		// A failed enqueue must leave the imported bug actionable by its human.
-		restored, restoreErr := i.Queries.UpdateIssue(ctx, db.UpdateIssueParams{
-			ID:            updated.ID,
-			AssigneeType:  issue.AssigneeType,
-			AssigneeID:    issue.AssigneeID,
-			StartDate:     updated.StartDate,
-			DueDate:       updated.DueDate,
-			ParentIssueID: updated.ParentIssueID,
-			ProjectID:     updated.ProjectID,
-			Stage:         updated.Stage,
-		})
-		if restoreErr != nil {
-			return updated, fmt.Errorf("enqueue developer agent: %w; restore member: %v", err, restoreErr)
+func (i *Importer) routeBugToExpert(ctx context.Context, original db.Issue, assignment bugDeveloperAssignment) (db.Issue, error) {
+	target := original
+	target.AssigneeType, target.AssigneeID = util.StrToText("agent"), assignment.DeveloperAgentID
+	var updated db.Issue
+	task, err := i.IssueService.TaskService.EnqueueAssignedIssueTask(ctx, target, assignment.Reviewer.UserID, func(q *db.Queries) error {
+		current, err := q.LockIssueForDescriptionUpdate(ctx, db.LockIssueForDescriptionUpdateParams{ID: original.ID, WorkspaceID: original.WorkspaceID})
+		if err != nil {
+			return err
 		}
-		i.publishExternalIssueUpdated(ctx, updated, restored, "external_bug_agent_routing_failed")
-		return restored, fmt.Errorf("enqueue developer agent: %w", err)
+		// A newer webhook or a local workflow change owns the newer snapshot.
+		if current.Revision != original.Revision {
+			return errBugRouteChanged
+		}
+		agent, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{WorkspaceID: current.WorkspaceID, ID: target.AssigneeID})
+		if err != nil {
+			return err
+		}
+		shared, err := IsWorkspaceBugExpert(ctx, q, agent, current.WorkspaceID)
+		if err != nil {
+			return err
+		}
+		if !shared {
+			return errors.New("workspace bug expert is no longer available")
+		}
+		busy, err := q.HasConflictingBugRepairTask(ctx, bugRepairConflict(current, agent.ID))
+		if err != nil {
+			return err
+		}
+		if busy {
+			return errBugRouteChanged
+		}
+		if !bugAutomationEnrolled(current.Metadata) {
+			var m map[string]any
+			if err = json.Unmarshal(current.Metadata, &m); err != nil {
+				return err
+			}
+			if !hasBugAutomationSlot(m) {
+				return errors.New("cannot store bug automation enrollment")
+			}
+			m[bugAutomationMetadataKey] = true
+			raw, err := json.Marshal(m)
+			if err != nil {
+				return err
+			}
+			current, err = q.UpdateIssueFromExternalSync(ctx, db.UpdateIssueFromExternalSyncParams{ID: current.ID, WorkspaceID: current.WorkspaceID, Title: current.Title, Description: util.StrToText(current.Description.String + bugAutomationAcceptance), Status: current.Status, Priority: current.Priority, Metadata: raw})
+			if err != nil {
+				return err
+			}
+		}
+		updated, err = q.UpdateIssue(ctx, db.UpdateIssueParams{ID: current.ID, AssigneeType: target.AssigneeType, AssigneeID: target.AssigneeID, StartDate: current.StartDate, DueDate: current.DueDate, ParentIssueID: current.ParentIssueID, ProjectID: current.ProjectID, Stage: current.Stage})
+		return err
+	})
+	if errors.Is(err, errBugRouteChanged) {
+		return i.Queries.GetIssueInWorkspace(ctx, db.GetIssueInWorkspaceParams{WorkspaceID: original.WorkspaceID, ID: original.ID})
 	}
-	i.info("external bug sync: developer agent routed",
-		"issue_id", util.UUIDToString(updated.ID),
-		"reviewer_id", util.UUIDToString(assignment.Reviewer.UserID),
-		"developer_agent_id", util.UUIDToString(assignment.DeveloperAgentID),
-	)
+	if err != nil {
+		return original, err
+	}
+	i.info("external bug sync: developer agent routed", "issue_id", util.UUIDToString(updated.ID), "developer_agent_id", util.UUIDToString(updated.AssigneeID), "reviewer_id", util.UUIDToString(assignment.Reviewer.UserID), "task_id", util.UUIDToString(task.ID))
 	return updated, nil
 }
 

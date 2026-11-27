@@ -786,7 +786,8 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 		return BugSyncItemResult{}, ErrMissingTitle
 	}
 	description := bugIssueDescription(item)
-	status := bugIssueStatus(item)
+	state := bugStateForSync(provider, item)
+	status := state.status
 	priority := bugIssuePriority(item)
 	metadata := bugIssueMetadata(payload, item, provider, recordID, assignment.FallbackReason)
 	delete(metadata, bugAutomationMetadataKey)
@@ -804,19 +805,6 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 		"description_present", strings.TrimSpace(description) != "",
 		"metadata_key_count", len(metadata),
 	)
-	metadataBytes, err := json.Marshal(metadata)
-	if err != nil {
-		i.warn("external bug sync: metadata marshal failed",
-			"provider", provider,
-			"workspace_id", util.UUIDToString(workspaceID),
-			"record_id", recordID,
-			"external_key", item.ExternalKey,
-			"bug_id", item.BugID,
-			"metadata_key_count", len(metadata),
-			"error", err,
-		)
-		return BugSyncItemResult{}, err
-	}
 
 	existing, err := i.Queries.GetIssueByOrigin(ctx, db.GetIssueByOriginParams{
 		WorkspaceID: workspaceID,
@@ -833,7 +821,7 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 			"issue_id", util.UUIDToString(existing.ID),
 			"issue_number", existing.Number,
 		)
-		existing, updated, err := i.updateBugSyncMirror(ctx, existing, assignment.Reviewer, title, description, status, priority, metadata)
+		existing, updated, err := i.updateBugSyncMirror(ctx, existing, assignment, title, description, state, priority, metadata)
 		if err != nil {
 			i.warn("external bug sync: existing issue update failed",
 				"provider", provider,
@@ -882,15 +870,6 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 		return BugSyncItemResult{}, fmt.Errorf("lookup existing bug issue by origin: %w", err)
 	}
 
-	if assignment.DeveloperAgentID.Valid && bugStatusStartsDevelopment(status) && i.IssueService.TaskService != nil && hasBugAutomationSlot(metadata) {
-		metadata[bugAutomationMetadataKey] = true
-		description += bugAutomationAcceptance
-		metadataBytes, err = json.Marshal(metadata)
-		if err != nil {
-			return BugSyncItemResult{}, err
-		}
-	}
-
 	createOpts := service.IssueCreateOpts{
 		ActorID:  util.UUIDToString(assignment.Reviewer.UserID),
 		Platform: "external_import:" + provider,
@@ -930,7 +909,7 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 				"issue_id", util.UUIDToString(existing.ID),
 				"issue_number", existing.Number,
 			)
-			existing, updated, updateErr := i.updateBugSyncMirror(ctx, existing, assignment.Reviewer, title, bugIssueDescription(item), status, priority, metadata)
+			existing, updated, updateErr := i.updateBugSyncMirror(ctx, existing, assignment, title, description, state, priority, metadata)
 			if updateErr != nil {
 				i.warn("external bug sync: raced issue update failed",
 					"provider", provider,
@@ -991,42 +970,16 @@ func (i *Importer) importBugSyncItem(ctx context.Context, payload BugSyncPayload
 		"assignee_id", util.UUIDToString(assignment.Reviewer.UserID),
 	)
 
-	updated, err := i.Queries.UpdateIssueFromExternalSync(ctx, db.UpdateIssueFromExternalSyncParams{
-		Title:       title,
-		Description: util.StrToText(description),
-		Status:      status,
-		Priority:    priority,
-		Metadata:    metadataBytes,
-		ID:          res.Issue.ID,
-		WorkspaceID: res.Issue.WorkspaceID,
-	})
+	before, updated, err := i.updateBugSyncMirror(ctx, res.Issue, assignment, title, description, state, priority, metadata)
 	if err != nil {
-		i.warn("external bug sync: created issue metadata stamp failed",
-			"provider", provider,
-			"workspace_id", util.UUIDToString(workspaceID),
-			"record_id", recordID,
-			"external_key", item.ExternalKey,
-			"bug_id", item.BugID,
-			"issue_id", util.UUIDToString(res.Issue.ID),
-			"error", err,
-		)
-		return BugSyncItemResult{}, fmt.Errorf("stamp external bug metadata: %w", err)
+		i.notifyAssignee(ctx, res.Issue, assignment.Reviewer.UserID)
+		return BugSyncItemResult{}, fmt.Errorf("sync newly created bug: %w", err)
 	}
-	i.info("external bug sync: created issue metadata stamped",
-		"provider", provider,
-		"workspace_id", util.UUIDToString(workspaceID),
-		"record_id", recordID,
-		"external_key", item.ExternalKey,
-		"bug_id", item.BugID,
-		"issue_id", util.UUIDToString(updated.ID),
-		"issue_number", updated.Number,
-		"status", updated.Status,
-		"priority", updated.Priority,
-		"metadata_key_count", len(metadata),
-	)
+	if before.AssigneeID != updated.AssigneeID || before.AssigneeType != updated.AssigneeType {
+		i.publishExternalIssueUpdated(ctx, before, updated, "external_bug_agent_routing")
+	}
 	i.publishIssueMetadataChanged(updated, "external_bug_sync")
 
-	updated = i.routeNewBugToDeveloperAgentIfEligible(ctx, updated, assignment, status)
 	i.notifyAssignee(ctx, updated, assignment.Reviewer.UserID)
 	return BugSyncItemResult{
 		Issue:          updated,
@@ -1421,6 +1374,24 @@ func normalizeBugText(input string) string {
 	return strings.Join(out, "\n")
 }
 
+type bugSyncState struct {
+	status           string
+	terminalBySyndra bool
+}
+
+// Only structured Syndra terminal states instruct the runtime to stop.
+// Never infer cancellation from descriptive text or caller-supplied metadata.
+func bugStateForSync(provider string, item BugSyncItem) bugSyncState {
+	code := firstNonEmpty(item.Status, item.BugDetail.Status, item.StatusName, item.BugDetail.StatusName)
+	if provider == defaultBugProvider {
+		switch strings.ToLower(code) {
+		case "resolved", "已解决", "closed", "已关闭":
+			return bugSyncState{status: "done", terminalBySyndra: true}
+		}
+	}
+	return bugSyncState{status: bugIssueStatus(item)}
+}
+
 func bugIssueStatus(item BugSyncItem) string {
 	combined := strings.ToLower(strings.Join([]string{item.Status, item.StatusName}, " "))
 	switch {
@@ -1509,8 +1480,8 @@ func bugIssueMetadata(payload BugSyncPayload, item BugSyncItem, provider, record
 	b.add("bug_type_id", item.BugTypeID)
 	b.add("bug_type", item.BugType)
 	b.add("bug_priority", item.Priority)
-	b.add("bug_status", item.Status)
-	b.add("bug_status_name", item.StatusName)
+	b.add("bug_status", firstNonEmpty(item.Status, item.BugDetail.Status))
+	b.add("bug_status_name", firstNonEmpty(item.StatusName, item.BugDetail.StatusName))
 	b.add("bug_resolve_solution", item.ResolveSolution)
 	b.add("bug_resolve_solution_name", item.ResolveSolutionName)
 	b.add("bug_created_at", item.CreatedAt)
@@ -1539,7 +1510,7 @@ func bugIssueMetadata(payload BugSyncPayload, item BugSyncItem, provider, record
 		value := item.Metadata[rawKey]
 		key := sanitizeBugMetadataKey(rawKey)
 		switch key {
-		case "external_source", "external_key", "sync_schema_version", "sync_source_env", "bug_id", "bug_entity_type", "bug_reopen_count", "bug_version_id", "bug_version_name", "bug_assignee_name", "bug_assignee_mate_id", "bug_assignee_syndra_user_id", "bug_verified_member_id", "bug_assignee_fallback_reason", "bug_updated_at", "bug_assignee_email_candidate":
+		case "external_source", "external_provider", "external_key", "bug_status", "bug_status_name", "sync_schema_version", "sync_source_env", "bug_id", "bug_entity_type", "bug_reopen_count", "bug_version_id", "bug_version_name", "bug_assignee_name", "bug_assignee_mate_id", "bug_assignee_syndra_user_id", "bug_verified_member_id", "bug_assignee_fallback_reason", "bug_updated_at", "bug_assignee_email_candidate":
 			continue // Routing and branch scope come from structured source fields, never arbitrary metadata.
 		}
 		b.add(key, value)

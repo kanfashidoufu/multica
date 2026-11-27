@@ -77,11 +77,11 @@ func (i *Importer) EndBranchWait(ctx context.Context, issue db.Issue, scope Bran
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	i.publishBranchWaitCancellation(ctx, issue, cancelled)
+	i.publishCancelledBugTasks(ctx, issue, cancelled)
 	return nil
 }
 
-func (i *Importer) publishBranchWaitCancellation(ctx context.Context, issue db.Issue, cancelled []db.AgentTaskQueue) {
+func (i *Importer) publishCancelledBugTasks(ctx context.Context, issue db.Issue, cancelled []db.AgentTaskQueue) {
 	if len(cancelled) > 0 && i.IssueService.TaskService != nil {
 		i.IssueService.TaskService.BroadcastCancelledTasks(ctx, util.UUIDToString(issue.WorkspaceID), cancelled)
 	}

@@ -450,7 +450,7 @@ Syndra가 `POST /api/webhooks/external-issues`로 Bug 또는 소규모 요구사
 |---|---|---|
 | `MULTICA_EXTERNAL_ISSUE_WEBHOOK_TOKEN` | 비어 있음 | 동기화 엔드포인트에 필요한 공유 secret. 요청은 `Authorization: Bearer <token>`을 보내야 합니다. 설정하지 않으면 엔드포인트가 `503 external issue sync is not configured`를 반환합니다 |
 | `MULTICA_EXTERNAL_BUG_WORKSPACE_ID` | 비어 있음 | `sync_type=bug` 전용 workspace id. 요청으로 재정의할 수 없습니다 |
-| `MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES` | `王宁` | 자동 수정 대상인 Syndra 담당자 이름(쉼표로 구분, 정확히 일치). 조건을 충족하는 새 Bug는 워크스페이스 전체에서 호출할 수 있는 `bug修复专家` 에이전트에 할당됩니다. |
+| `MULTICA_EXTERNAL_BUG_AUTOMATION_ASSIGNEES` | `王宁` | 자동 수정 대상인 Syndra 담당자 이름(쉼표로 구분, 정확히 일치). 새 Bug와 재동기화 시 수정이 필요한 기존 Bug는 조건을 충족하면 워크스페이스 전체에서 호출할 수 있는 `bug修复专家` 에이전트에 할당됩니다. |
 | `MULTICA_EXTERNAL_REQUIREMENT_WORKSPACE_ID` | 비어 있음 | `sync_type=requirement` 전용 workspace id. 요청으로 재정의할 수 없으며 요구사항과 Bug workspace를 분리합니다 |
 
 Syndra Bug 동기화(`sync_type=bug`)에서 v1은 기존 멤버 확인 방식을 유지합니다. 운영 v2는 문자열 `syndra_user_id`로 Feishu 신원을 확인하고 조건을 충족하면 초대 없이 계정을 생성하고 멤버로 추가합니다. 확인하지 못하면 워크스페이스 소유자가 담당합니다. 소규모 요구사항 동기화는 `sync_type=requirement`를 사용하고 `executor_id`의 Multica Agent를 할당하며 해당 Agent의 owner를 issue creator로 기록합니다. 기존 기본 workspace/assignee 변수와 Feishu Base 파라미터는 더 이상 지원하지 않습니다.

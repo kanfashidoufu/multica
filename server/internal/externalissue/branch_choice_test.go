@@ -83,7 +83,7 @@ func testBranchHandoff(t *testing.T, status, noticeType string) {
 		name    string
 		enabled int
 	}{{"王宁", 1}, {"新成员", 0}, {"新成员", 0}} {
-		_, updated, err := i.updateBugSyncMirror(ctx, issue, db.Member{UserID: newOwner.User.ID}, "waiting", "source", "todo", "none", map[string]any{"bug_assignee_name": tc.name, "sync_source_env": "prod", "bug_version_id": 42})
+		_, updated, err := i.updateBugSyncMirror(ctx, issue, bugDeveloperAssignment{Reviewer: db.Member{UserID: newOwner.User.ID}}, "waiting", "source", bugSyncState{status: "todo"}, "none", map[string]any{"bug_assignee_name": tc.name, "sync_source_env": "prod", "bug_version_id": 42})
 		if err != nil {
 			t.Fatal(err)
 		}
