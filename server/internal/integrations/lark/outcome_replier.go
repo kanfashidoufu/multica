@@ -377,6 +377,10 @@ func (r *LarkOutcomeReplier) sendChatNotice(ctx context.Context, inst Installati
 		return err
 	}
 	header := r.noticeHeader
+	if msg.ChatType == ChatTypeP2P {
+		_, err := r.client.SendTextMessage(ctx, SendTextParams{InstallationID: creds, ChatID: msg.ChatID, Text: body})
+		return err
+	}
 	if agent, aerr := r.queries.GetAgent(ctx, inst.AgentID); aerr == nil && agent.Name != "" {
 		header = agent.Name
 	}

@@ -384,7 +384,7 @@ func ConfirmedBranch(ctx context.Context, q *db.Queries, ticket db.Issue, s Bran
 		expectedIssue = original
 		var repo string
 		kind, repo, value = inlineChoice(c.Content)
-		if repo != "" && repo != s.Repo {
+		if !branchRepoMatches(repo, s.Repo) {
 			value = ""
 		}
 	}

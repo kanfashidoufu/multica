@@ -1,12 +1,49 @@
 package service
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestSyndraFeishuBranchSkillHelper(t *testing.T) {
+	script := syndraSkillScript(t, "feishu-branch.sh")
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/issues/syndra-feishu-branches" || r.Header.Get("Authorization") != "Bearer mat_test_fixture" {
+			t.Error("wrong endpoint or task authorization")
+		}
+		if r.Method == "POST" {
+			var v struct {
+				Issue, Repo, Branch, Fragment string
+				Replace                       bool
+			}
+			if json.NewDecoder(r.Body).Decode(&v) != nil || v.Issue != "QTB-1974" || v.Repo != "example.org/team/repo" || v.Branch != "feature/v3_一二期" || v.Fragment != "一二期" || !v.Replace {
+				t.Error("wrong choice payload")
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	t.Setenv("MULTICA_TOKEN", "mat_test_fixture")
+	t.Setenv("MULTICA_SERVER_URL", srv.URL)
+	for _, args := range [][]string{{"options"}, {"replace", "QTB-1974", "example.org/team/repo", "feature/v3_一二期", "一二期"}} {
+		c := exec.Command("bash", append([]string{script}, args...)...)
+		if out, err := c.CombinedOutput(); err != nil || string(out) != `{"ok":true}` {
+			t.Fatalf("helper: %s, %v", out, err)
+		}
+	}
+	t.Setenv("MULTICA_TOKEN", "personal-test")
+	if err := exec.Command("bash", script, "options").Run(); err == nil {
+		t.Fatal("accepted non-task credentials")
+	}
+}
 
 func syndraSkillScript(t *testing.T, name string) string {
 	t.Helper()

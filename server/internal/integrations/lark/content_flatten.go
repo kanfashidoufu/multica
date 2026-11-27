@@ -139,6 +139,39 @@ type larkPostSpan struct {
 	MimeType string `json:"mime_type"`
 }
 
+// OwnSelectionText reads only visible, user-authored text. In particular, the
+// agent transcript's "label (href)" expansion is not two command arguments.
+// Cards, forwards and attachments are not a member's branch selection.
+func OwnSelectionText(kind, content string) (string, bool) {
+	switch kind {
+	case "text":
+		var body struct{ Text string }
+		if json.Unmarshal([]byte(content), &body) != nil || strings.TrimSpace(body.Text) == "" {
+			return "", false
+		}
+		return body.Text, true
+	case "post":
+		doc, err := decodePostContent(content)
+		if err != nil {
+			return "", false
+		}
+		parts := []string{doc.Title}
+		for _, line := range doc.Content {
+			for _, span := range line {
+				switch span.Tag {
+				case "text", "code_block", "a":
+					parts = append(parts, span.Text)
+				default:
+					return "", false
+				}
+			}
+		}
+		body := strings.TrimSpace(strings.Join(parts, " "))
+		return body, body != ""
+	}
+	return "", false
+}
+
 // flattenPostContent flattens a received `post` body.content into plain
 // text: the title (when present) on its own first line, then one line
 // per paragraph. Within a paragraph spans are joined with a single space

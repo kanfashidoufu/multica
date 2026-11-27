@@ -1,16 +1,14 @@
 ---
 name: multica-fixing-syndra-bugs
-description: "Use for enrolled Syndra bugs: resolve the assignee's version branch, resume isolated fixes, hand off for review, and verify integration into version/test."
+description: "Handle Feishu DMs to the Bug expert about choosing a repair branch, and deliver enrolled Syndra fixes to the verified version/test branches."
 user-invocable: false
 allowed-tools: Bash(multica *), Bash(git *), Bash(gh *), Bash(bash *)
 ---
 
 # Deliver Syndra bug fixes to version and test branches
 
-The acceptance criteria are validation, CI, merge into the confirmed version
-branch, promotion to remote `test`, and review notification. A PR or auto-merge
-setting alone is incomplete. Use the current Syndra assignee as branch
-decision and review contact; respect Agent Identity limits.
+In the Bug expert's Feishu DM, interpret branch choices conversationally using [references/feishu-choices.md](references/feishu-choices.md); do not repair code from the chat run.
+On the assigned Bug run, verify local validation, CI, remote version/test integration and review notification. A PR alone is incomplete. The current Syndra assignee makes branch decisions.
 
 Read `multica-platform/references/issues.md`, `projects.md`, and `mentions.md`
 when using their status, checkout, PR and reply contracts. These live under the

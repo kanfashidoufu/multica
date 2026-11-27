@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -548,7 +549,16 @@ func (p *Patcher) sendChatReply(ctx context.Context, creds InstallationCredentia
 	content = p.linkReplyReferences(ctx, workspaceID, content)
 	// A plain answer with bound images also needs an updatable card. The
 	// bounded metadata probe does not read bytes or wait for an upload.
-	markdown := containsMarkdown(content) || p.replyNeedsMediaCard(ctx, workspaceID, payload)
+	rich := containsMarkdown(content)
+	if binding.ChatType == string(ChatTypeP2P) {
+		// An issue link, a branch in backticks or a short list is still a
+		// conversation. Keep cards for content that actually needs layout.
+		rich = strings.Contains(content, "```") || dmTable.MatchString(content) || strings.Contains(content, "![")
+	}
+	markdown := rich || p.replyNeedsMediaCard(ctx, workspaceID, payload)
+	if !markdown && binding.ChatType == string(ChatTypeP2P) {
+		content = dmReplyText(content)
+	}
 
 	// used records the target the send actually went out on. The whole
 	// point of sendWithReplyFallback is that it may retry without

@@ -785,6 +785,7 @@ func TestPatcherSendsToChatWithoutTriggerMessage(t *testing.T) {
 // card path also threads when the trigger was in a topic.
 func TestPatcherThreadReplyMarkdownRoutesToThread(t *testing.T) {
 	p, q, api := newTestPatcher(t)
+	q.binding.ChatType = string(ChatTypeGroup)
 	q.binding.LastMessageID = pgtype.Text{String: "om_trigger", Valid: true}
 	q.binding.LastThreadID = pgtype.Text{String: "omt_topic", Valid: true}
 	taskID := uuidFromString(t, "ee888888-ee88-ee88-ee88-eeeeeeeeeeee")
@@ -804,6 +805,15 @@ func TestPatcherThreadReplyMarkdownRoutesToThread(t *testing.T) {
 	got := api.mdCardSent[0].ReplyTarget
 	if got.MessageID != "om_trigger" || !got.InThread {
 		t.Errorf("expected markdown thread reply target {om_trigger, InThread:true}; got %+v", got)
+	}
+}
+
+func TestPatcherPrivateBranchConversationUsesText(t *testing.T) {
+	p, q, api := newTestPatcher(t)
+	task := uuidFromString(t, "ee444444-ee44-ee44-ee44-eeeeeeeeeeee")
+	p.handleEvent(events.Event{Type: protocol.EventChatDone, TaskID: uuidString(task), ChatSessionID: uuidString(q.binding.ChatSessionID), Payload: protocol.ChatDonePayload{Content: "**QTB-1974** 用 `feature/v3.1609_一二期`，是这条吗？"}})
+	if len(api.textSent) != 1 || api.textSent[0].Text != "QTB-1974 用 feature/v3.1609_一二期，是这条吗？" || len(api.mdCardSent) != 0 {
+		t.Fatal("ordinary DM must be a single text bubble", api.textSent)
 	}
 }
 

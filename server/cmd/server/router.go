@@ -2291,6 +2291,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 			// Issues
 			r.Route("/api/issues", func(r chi.Router) {
+				r.Get("/syndra-feishu-branches", h.SyndraFeishuConversation)
+				r.Post("/syndra-feishu-branches", h.SyndraFeishuConversation)
 				r.Post("/table/groups", h.ListIssueTableGroups)
 				r.Post("/table/rows", h.ListIssueTableRows)
 				r.Post("/table/facets", h.ListIssueTableFacets)

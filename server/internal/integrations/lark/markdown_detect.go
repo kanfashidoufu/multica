@@ -15,15 +15,26 @@ import (
 // Patterns are compiled once at package init; containsMarkdown is on
 // the chat-reply hot path.
 var markdownPatterns = []*regexp.Regexp{
-	regexp.MustCompile("(?m)^#{1,6}[ \t]"),               // headings: # H1, ###### H6
-	regexp.MustCompile("(?m)^[ \t]*[-*+][ \t]"),          // unordered list
-	regexp.MustCompile("(?m)^[ \t]*\\d+\\.[ \t]"),        // ordered list
-	regexp.MustCompile("(?m)^>[ \t]"),                    // blockquote
+	regexp.MustCompile("(?m)^#{1,6}[ \t]"),                        // headings: # H1, ###### H6
+	regexp.MustCompile("(?m)^[ \t]*[-*+][ \t]"),                   // unordered list
+	regexp.MustCompile("(?m)^[ \t]*\\d+\\.[ \t]"),                 // ordered list
+	regexp.MustCompile("(?m)^>[ \t]"),                             // blockquote
 	regexp.MustCompile("(?m)^[ \t]*(?:---|\\*\\*\\*|___)[ \t]*$"), // hr / thematic break
-	regexp.MustCompile("\\*\\*[^*\\n]+\\*\\*"),           // **bold**
-	regexp.MustCompile("__[^_\\n]+__"),                   // __bold__
-	regexp.MustCompile("(?m)^[ \t]*\\|.+\\|[ \t]*$"),     // table row (must have | on both ends)
-	regexp.MustCompile("\\[[^\\]\\n]+\\]\\([^)\\n]+\\)"), // [text](url) link / image
+	regexp.MustCompile("\\*\\*[^*\\n]+\\*\\*"),                    // **bold**
+	regexp.MustCompile("__[^_\\n]+__"),                            // __bold__
+	regexp.MustCompile("(?m)^[ \t]*\\|.+\\|[ \t]*$"),              // table row (must have | on both ends)
+	regexp.MustCompile("\\[[^\\]\\n]+\\]\\([^)\\n]+\\)"),          // [text](url) link / image
+}
+
+var dmTable = regexp.MustCompile(`(?m)^\s*\|[^\n]+\|\s*$`)
+var dmLink = regexp.MustCompile(`\[([^]\n]+)\]\((https?://[^)\s]+)\)`)
+var dmCode = regexp.MustCompile("`([^`\n]+)`")
+var dmBold = regexp.MustCompile(`\*\*([^*\n]+)\*\*`)
+
+func dmReplyText(content string) string {
+	content = dmCode.ReplaceAllString(content, "$1")
+	content = dmBold.ReplaceAllString(content, "$1")
+	return dmLink.ReplaceAllString(content, "$1 ($2)")
 }
 
 // containsMarkdown returns true when the body almost certainly

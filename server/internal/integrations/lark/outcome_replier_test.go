@@ -271,6 +271,15 @@ func TestLarkOutcomeReplierCommandOutcomesSendGuidance(t *testing.T) {
 	}
 }
 
+func TestLarkOutcomeReplierVerifiedChoiceIsPlainDM(t *testing.T) {
+	stub := &stubAPIClientWithRecorder{configured: true}
+	r := NewLarkOutcomeReplier(OutcomeReplierConfig{APIClient: stub, BindingSvc: &BindingTokenService{}, Credentials: stubCredentialsResolver{secret: "s"}, Queries: stubReplierQueries{}, AppURL: "https://multica.test"})
+	r.Reply(t.Context(), Installation{}, InboundMessage{ChatID: "oc_fixture", ChatType: ChatTypeP2P}, DispatchResult{Outcome: Outcome(engine.OutcomeCommandReply), CommandReply: "记下了，接着修。"})
+	if len(stub.interactiveOut) != 0 || len(stub.textOut) != 1 || stub.textOut[0].Text != "记下了，接着修。" {
+		t.Fatal("branch acknowledgment used a card")
+	}
+}
+
 // TestLarkOutcomeReplierIngestedAndDroppedAreSilent asserts that the
 // replier does NOT call the APIClient on outcomes owned elsewhere
 // (Patcher handles Ingested; Dropped is informational only).
